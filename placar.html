@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Placar</title>
+<style>
+  :root {
+    --bg: #e9eef2; --ink: #14233a; --muted: #5a6b82; --card: #ffffff;
+    --line: #c9d3de; --accent: #2457d6; --lead: #f2c230; --danger: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1a2b; --ink: #e8eef6; --muted: #9fb0c6; --card: #17263d;
+      --line: #2b3d58; --accent: #6c97ff; --lead: #f2c230; --danger: #ff7b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--ink);
+    font-family: "Bahnschrift", "Roboto Condensed", "Arial Narrow", Arial, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 2rem; margin: 0 0 16px; letter-spacing: .01em; }
+
+  .novo { display: flex; gap: 8px; margin-bottom: 20px; }
+  .novo input {
+    flex: 1; min-width: 0; padding: 10px 12px; font: inherit; font-size: 1rem;
+    color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+  }
+  button {
+    font: inherit; cursor: pointer; color: var(--ink); background: var(--card);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 14px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .primario { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  .primario:hover { filter: brightness(1.1); }
+
+  .lista { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .time {
+    display: grid; grid-template-columns: 40px 1fr auto; align-items: center; gap: 12px;
+    padding: 12px 14px; background: var(--card); border: 1px solid var(--line);
+    border-left: 6px solid var(--line); border-radius: 6px;
+  }
+  .time.lider { border-left-color: var(--lead); }
+  .pos { font-size: 1.5rem; font-weight: 700; color: var(--muted); text-align: center; }
+  .nome { font-size: 1.25rem; font-weight: 700; overflow-wrap: anywhere; }
+  .pontos {
+    font-size: 3rem; line-height: 1; font-weight: 700;
+    font-variant-numeric: tabular-nums; min-width: 2.5ch; text-align: right;
+  }
+  .acoes { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 8px; }
+  .acoes .remover { margin-left: auto; color: var(--danger); }
+
+  .vazio { padding: 28px 16px; text-align: center; color: var(--muted); background: var(--card); border: 1px dashed var(--line); border-radius: 6px; }
+  .rodape { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; color: var(--muted); font-size: .9rem; }
+  .erro { color: var(--danger); min-height: 1.2em; margin: -12px 0 12px; font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Placar</h1>
+
+  <form class="novo" id="form-novo">
+    <input id="nome-novo" type="text" maxlength="30" placeholder="Nome do time ou jogador" aria-label="Nome do time ou jogador" autocomplete="off">
+    <button class="primario" type="submit">Adicionar</button>
+  </form>
+  <div class="erro" id="erro" role="alert"></div>
+
+  <ul class="lista" id="lista"></ul>
+
+  <div class="rodape">
+    <span id="resumo"></span>
+    <button id="btn-zerar" type="button">Zerar pontos</button>
+  </div>
+</main>
+
+<script>
+/* ============================================================
+   CAMADA DE DADOS
+   Hoje os dados ficam só na memória e somem ao recarregar a página.
+   Para usar um banco de dados, troque o corpo de cada método abaixo
+   por uma chamada ao seu servidor (veja os exemplos em comentário).
+   A interface (parte de baixo) só conversa com este objeto,
+   então nada mais precisa mudar.
+   ============================================================ */
+const api = {
+  _proximoId: 4,
+  _times: [
+    { id: 1, nome: "Time Azul",     pontos: 12 },
+    { id: 2, nome: "Time Vermelho", pontos: 9 },
+    { id: 3, nome: "Time Verde",    pontos: 5 }
+  ],
+
+  async listar() {
+    // return (await fetch("/api/times")).json();
+    return structuredClone(this._times);
+  },
+
+  async adicionar(nome) {
+    // return (await fetch("/api/times", { method: "POST",
+    //   headers: { "Content-Type": "application/json" },
+    //   body: JSON.stringify({ nome }) })).json();
+    this._times.push({ id: this._proximoId++, nome, pontos: 0 });
+  },
+
+  async alterarPontos(id, delta) {
+    // await fetch(`/api/times/${id}/pontos`, { method: "PATCH",
+    //   headers: { "Content-Type": "application/json" },
+    //   body: JSON.stringify({ delta }) });
+    const t = this._times.find(t => t.id === id);
+    if (t) t.pontos = Math.max(0, t.pontos + delta);
+  },
+
+  async remover(id) {
+    // await fetch(`/api/times/${id}`, { method: "DELETE" });
+    this._times = this._times.filter(t => t.id !== id);
+  },
+
+  async zerar() {
+    // await fetch("/api/times/zerar", { method: "POST" });
+    this._times.forEach(t => t.pontos = 0);
+  }
+};
+
+/* ============================================================
+   INTERFACE
+   ============================================================ */
+const $lista = document.getElementById("lista");
+const $resumo = document.getElementById("resumo");
+const $erro = document.getElementById("erro");
+const $nome = document.getElementById("nome-novo");
+
+async function desenhar() {
+  const times = (await api.listar()).sort((a, b) => b.pontos - a.pontos || a.nome.localeCompare(b.nome));
+  $lista.replaceChildren();
+
+  if (times.length === 0) {
+    const li = document.createElement("li");
+    li.className = "vazio";
+    li.textContent = "Nenhum time ainda. Digite um nome acima e clique em Adicionar.";
+    $lista.append(li);
+    $resumo.textContent = "";
+    return;
+  }
+
+  const maior = times[0].pontos;
+  times.forEach((t, i) => {
+    const li = document.createElement("li");
+    li.className = "time" + (maior > 0 && t.pontos === maior ? " lider" : "");
+
+    const pos = document.createElement("div");
+    pos.className = "pos";
+    pos.textContent = i + 1;
+
+    const nome = document.createElement("div");
+    nome.className = "nome";
+    nome.textContent = t.nome;
+
+    const pontos = document.createElement("div");
+    pontos.className = "pontos";
+    pontos.textContent = t.pontos;
+    pontos.setAttribute("aria-label", t.pontos + " pontos");
+
+    const acoes = document.createElement("div");
+    acoes.className = "acoes";
+    [-1, 1, 2, 3].forEach(d => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = d > 0 ? "+" + d : String(d);
+      b.setAttribute("aria-label", (d > 0 ? "Somar " + d : "Tirar " + Math.abs(d)) + " ponto(s) de " + t.nome);
+      b.addEventListener("click", async () => { await api.alterarPontos(t.id, d); desenhar(); });
+      acoes.append(b);
+    });
+    const rem = document.createElement("button");
+    rem.type = "button";
+    rem.className = "remover";
+    rem.textContent = "Remover";
+    rem.setAttribute("aria-label", "Remover " + t.nome);
+    rem.addEventListener("click", async () => { await api.remover(t.id); desenhar(); });
+    acoes.append(rem);
+
+    li.append(pos, nome, pontos, acoes);
+    $lista.append(li);
+  });
+
+  const total = times.reduce((s, t) => s + t.pontos, 0);
+  $resumo.textContent = times.length + (times.length === 1 ? " time" : " times") + " · " + total + " pontos no total";
+}
+
+document.getElementById("form-novo").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const nome = $nome.value.trim();
+  $erro.textContent = "";
+  if (!nome) { $erro.textContent = "Digite um nome para adicionar."; return; }
+  const existentes = await api.listar();
+  if (existentes.some(t => t.nome.toLowerCase() === nome.toLowerCase())) {
+    $erro.textContent = "Já existe um time com esse nome.";
+    return;
+  }
+  await api.adicionar(nome);
+  $nome.value = "";
+  desenhar();
+});
+
+document.getElementById("btn-zerar").addEventListener("click", async () => {
+  if (confirm("Zerar os pontos de todos os times?")) { await api.zerar(); desenhar(); }
+});
+
+desenhar();
+</script>
+</body>
+</html>
