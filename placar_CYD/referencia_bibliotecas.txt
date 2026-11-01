@@ -1,0 +1,150 @@
+REFERÊNCIA RÁPIDA - BIBLIOTECAS DO PLACAR CYD (ESP32-2432S028R)
+================================================================
+
+Tela: 320 x 240 em paisagem (setRotation 1 ou 3)
+      240 x 320 em retrato  (setRotation 0 ou 2)
+Coordenadas: (0,0) é o canto superior esquerdo. X cresce para a direita, Y para baixo.
+
+
+----------------------------------------------------------------
+1. TFT_eSPI  (tela)          #include <TFT_eSPI.h>
+----------------------------------------------------------------
+
+Criar o objeto:
+  TFT_eSPI tft = TFT_eSPI();
+
+--- Inicialização ---
+  tft.init();                   Liga a tela (chamar 1 vez no setup)
+  tft.setRotation(r);           0 a 3. 1 ou 3 = paisagem
+  tft.width();  tft.height();   Largura/altura atuais (dependem da rotação)
+  tft.invertDisplay(true);      Inverte as cores (se aparecerem trocadas)
+
+--- Limpar / preencher ---
+  tft.fillScreen(cor);          Pinta a tela toda (causa piscada, evite no loop)
+  tft.fillRect(x, y, w, h, cor);    Apaga/pinta só uma área (melhor p/ atualizar)
+
+--- Texto (modo cursor) ---
+  tft.setCursor(x, y);          Posição do próximo print
+  tft.print(valor);             Escreve (texto, int, float, String)
+  tft.println(valor);           Escreve e pula linha
+  tft.setTextSize(n);           Multiplicador de tamanho (1 = 6x8 px por letra)
+  tft.setTextColor(cor);        Só a cor da letra (fundo transparente)
+  tft.setTextColor(cor, fundo); Cor da letra + fundo (sobrescreve o texto antigo)
+  tft.setTextFont(n);           Fonte: 1 (pequena), 2, 4, 6 (só números), 7 (display 7 segmentos), 8 (números grandes)
+  tft.setTextWrap(false);       Não quebra linha quando chega na borda
+
+--- Texto (modo posicionado) ---
+  tft.drawString("texto", x, y);        Escreve na posição, usando o "datum"
+  tft.drawString("texto", x, y, fonte);
+  tft.drawNumber(numero, x, y);         Escreve um inteiro
+  tft.drawFloat(valor, casas, x, y);    Escreve um float com N casas decimais
+  tft.setTextDatum(datum);              Define o ponto de referência do (x, y):
+        TL_DATUM  TC_DATUM  TR_DATUM    (topo: esquerda / centro / direita)
+        ML_DATUM  MC_DATUM  MR_DATUM    (meio)
+        BL_DATUM  BC_DATUM  BR_DATUM    (base)
+     Ex.: tft.setTextDatum(MC_DATUM); tft.drawString("GOL", 160, 120);  -> centralizado na tela
+  tft.setTextPadding(px);       Largura mínima que o drawString apaga atrás do texto
+                                (resolve o problema do "10" virar "9" e sobrar dígito)
+  tft.textWidth("texto");       Largura em pixels do texto com a fonte/tamanho atuais
+  tft.fontHeight();             Altura da fonte atual
+
+--- Formas ---
+  tft.drawPixel(x, y, cor);
+  tft.drawLine(x0, y0, x1, y1, cor);
+  tft.drawFastHLine(x, y, w, cor);      Linha horizontal (mais rápida)
+  tft.drawFastVLine(x, y, h, cor);      Linha vertical (mais rápida)
+  tft.drawRect(x, y, w, h, cor);        Retângulo (contorno)
+  tft.fillRect(x, y, w, h, cor);        Retângulo cheio
+  tft.drawRoundRect(x, y, w, h, raio, cor);   Retângulo arredondado (bom p/ botões)
+  tft.fillRoundRect(x, y, w, h, raio, cor);
+  tft.drawCircle(x, y, raio, cor);
+  tft.fillCircle(x, y, raio, cor);
+  tft.drawTriangle(x0, y0, x1, y1, x2, y2, cor);
+  tft.fillTriangle(x0, y0, x1, y1, x2, y2, cor);
+
+--- Cores ---
+  Prontas: TFT_BLACK, TFT_WHITE, TFT_RED, TFT_GREEN, TFT_BLUE, TFT_YELLOW,
+           TFT_CYAN, TFT_MAGENTA, TFT_ORANGE, TFT_PINK, TFT_PURPLE, TFT_NAVY,
+           TFT_MAROON, TFT_OLIVE, TFT_DARKGREEN, TFT_DARKGREY, TFT_LIGHTGREY
+  Personalizada: tft.color565(r, g, b)   (r, g, b de 0 a 255)
+
+--- Sprite (desenhar sem piscar) ---
+  Desenha numa "tela invisível" na memória e depois manda tudo de uma vez.
+  TFT_eSprite spr = TFT_eSprite(&tft);
+  spr.createSprite(w, h);       Cria a área (usa RAM: w*h*2 bytes, cuidado com tamanhos grandes)
+  spr.fillSprite(cor);          Limpa o sprite
+  spr.drawString(...), spr.fillRect(...), etc.   Mesmas funções do tft
+  spr.pushSprite(x, y);         Joga o sprite na tela na posição (x, y)
+  spr.deleteSprite();           Libera a memória
+
+
+----------------------------------------------------------------
+2. XPT2046_Touchscreen  (touch)   #include <XPT2046_Touchscreen.h>
+----------------------------------------------------------------
+
+Pinos do CYD: IRQ 36, MOSI 32, MISO 39, CLK 25, CS 33 (SPI separado, VSPI)
+
+Criar os objetos:
+  SPIClass touchSPI = SPIClass(VSPI);
+  XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
+
+No setup:
+  touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  ts.begin(touchSPI);
+  ts.setRotation(1);            Usar a mesma rotação da tela
+
+Leitura:
+  ts.touched();                 true se a tela está sendo tocada
+  ts.tirqTouched();             true se o pino IRQ indicou toque (mais leve que touched)
+  TS_Point p = ts.getPoint();   Lê o ponto tocado:
+      p.x, p.y                  Valor bruto (aprox. 200 a 3800), NÃO é pixel
+      p.z                       Pressão (quanto maior, mais forte o toque)
+
+Converter para pixel (valores do tutorial Random Nerd, ajustar se ficar desalinhado):
+  int x = map(p.x, 200, 3700, 1, 320);
+  int y = map(p.y, 240, 3800, 1, 240);
+
+Exemplo: botão na tela
+  // desenhar
+  tft.fillRoundRect(20, 180, 120, 40, 8, TFT_BLUE);
+  // ler
+  if (ts.touched()) {
+    TS_Point p = ts.getPoint();
+    int x = map(p.x, 200, 3700, 1, 320);
+    int y = map(p.y, 240, 3800, 1, 240);
+    if (x >= 20 && x <= 140 && y >= 180 && y <= 220) {
+      // tocou no botão
+    }
+    delay(200);                 // evita vários toques seguidos
+  }
+
+
+----------------------------------------------------------------
+3. SPI   #include <SPI.h>
+----------------------------------------------------------------
+  SPIClass nome = SPIClass(VSPI);         Cria um barramento SPI (VSPI ou HSPI)
+  nome.begin(sck, miso, mosi, cs);        Liga o barramento nos pinos escolhidos
+  (A TFT_eSPI já cuida do SPI da tela sozinha, pelos pinos do User_Setup.h)
+
+
+----------------------------------------------------------------
+4. Funções do Arduino úteis no placar
+----------------------------------------------------------------
+  pinMode(22, INPUT_PULLUP);    Botão entre o pino e o GND (lê LOW quando apertado)
+  pinMode(35, INPUT);           IO35: sem pull-up interno, usar resistor de 10k no 3.3V
+  digitalRead(pino);            HIGH ou LOW
+  analogRead(pino);             0 a 4095 no ESP32
+  millis();                     Milissegundos desde que ligou (para cronômetro sem travar)
+  delay(ms);                    Pausa (trava o programa, evitar delays longos no loop)
+  Serial.begin(115200);         Abre o Monitor Serial
+  Serial.println(valor);        Escreve no Monitor Serial (bom para debug)
+
+Cronômetro sem delay (ex.: tempo de jogo):
+  unsigned long ultimo = 0;
+  void loop() {
+    if (millis() - ultimo >= 1000) {   // passou 1 segundo
+      ultimo = millis();
+      segundos++;
+      // redesenhar só o relógio
+    }
+  }
