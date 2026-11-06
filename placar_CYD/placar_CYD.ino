@@ -2,6 +2,11 @@
 #include <SPI.h>
 #include  <XPT2046_Touchscreen.h>
 #include "segredos.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+
 
 
 
@@ -28,6 +33,86 @@ bool timerRodando = false;
 int ultimoSegundo = -1;           // só redesenhar quando o segundo muda
 int periodo = 1;                  // 1º ou 2º tempo
 const unsigned long DURACAO_TEMPO = 45UL * 60 * 1000;   // 45 min em ms (para testar: 1UL * 60 * 1000)
+
+// Configuração da partida, vinda do Supabase
+String nomeA = "CASA";
+String nomeB = "VISITANTE";
+String modoAtual = "futebol";
+long ultimoId = -1;               // id da última partida lida (-1 = nenhuma ainda)
+int placarA = 0;
+int placarB = 0;
+unsigned long ultimaConsulta = 0; 
+
+
+void conectarWiFi(){
+  Serial.println("Conectando no wifi");
+  WiFi.begin(WIFI_NOME, WIFI_SENHA);
+
+  unsigned long inicio = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - inicio < 10000){
+    delay(500);
+    Serial.println(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\nConectado! IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nSem Wi-Fi, seguindo offline.");
+  }
+}
+
+
+
+void buscarPartida() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure cliente;
+  cliente.setInsecure();          // não confere o certificado (melhorar na Etapa 5)
+
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/rest/v1/partidas?placar_id=eq." + PLACAR_ID
+             + "&order=id.desc&limit=1";
+
+  http.begin(cliente, url);
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
+  http.setTimeout(3000);          // no máximo 3 s esperando
+
+  int codigo = http.GET();
+  Serial.print("Codigo HTTP: ");
+  Serial.println(codigo);
+  if (codigo == 200) {
+    JsonDocument doc;
+    DeserializationError erro = deserializeJson(doc, http.getString());
+
+    if (erro) {
+      Serial.print("Erro no JSON: ");
+      Serial.println(erro.c_str());
+    } else if (doc.size() == 0) {
+      Serial.println("Nenhuma partida no banco.");
+    } else {
+      JsonObject p = doc[0];
+      long id = p["id"];
+
+      if (id != ultimoId) {
+        bool primeiraLeitura = (ultimoId == -1);
+        ultimoId = id;
+
+        if (primeiraLeitura) {
+          // ao ligar: só guarda os nomes, não pula direto para o jogo
+          nomeA = p["time_a"].as<String>();
+          nomeB = p["time_b"].as<String>();
+          Serial.println("Partida atual: " + nomeA + " x " + nomeB);
+        } else {
+          Serial.println("Partida nova!");
+          aplicarPartida(p["modo"].as<String>(), p["time_a"].as<String>(), p["time_b"].as<String>());
+        }
+      }
+    }
+  }
+  http.end();
+}
 
 unsigned long tempoDecorrido(){
   if(timerRodando) return tempoPausado + (millis() - inicioTimer);
@@ -141,27 +226,24 @@ void desenharPlacarFutebol(String timeA, String timeB, int placarA, int placarB,
   // Linha divisória
   tft.drawLine(160, 60, 160, 220, TFT_DARKGREY); // inicio em x, incio em y, final x, final ym cor
 
-  // Placar da Equipe A
+  // Nomes dos times, centralizados em cada metade
+  tft.setTextSize(2);
+  tft.setTextDatum(TC_DATUM);              // x = centro do texto
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.setTextSize(3);
-  tft.setCursor(30, 60);
-  tft.println(timeA);
+  tft.drawString(timeA, 80, 70);           // centro da metade esquerda
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString(timeB, 240, 70);          // centro da metade direita
+  tft.setTextDatum(TL_DATUM);
 
+  // Placar
   tft.setTextSize(5);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setCursor(60, 110);
   tft.println(placarA);
 
-  // Placar da Equipe B
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextSize(3);
-  tft.setCursor(200, 60);
-  tft.println(timeB);
-
-  tft.setTextSize(5);
   tft.setCursor(230, 110);
   tft.println(placarB);
-
-
 }
 
 void desenharPlacarBasquete(String timeA, String timeB, int placarA, int placarB, int set){
@@ -178,11 +260,32 @@ void desenharPlacarTenis(String timeA, String timeB, int setsA, int setsB){
 void desenharPlacarJiuJitsu(String lutadorA, String lutadorB, int punicoesA, int punicoesB, int vantagensA, int vantagensB){
 
 }
+
+void aplicarPartida(String modo, String timeA, String timeB){
+  modoAtual = modo;
+  nomeA = timeA;
+  nomeB = timeB;
+  placarA = 0;
+  placarB = 0;
+  periodo = 1;
+  zerarTimer();
+
+  if(modo == "futebol"){
+    telaAtual = 1;
+    desenharPlacarFutebol(nomeA, nomeB, placarA, placarB, 0, 0);
+  } else{ //Colocar outras telas de jogo
+    telaAtual = 0;
+    telaInicial();
+  }
+}
+
 void setup() {
+  Serial.begin(115200);
+  conectarWiFi();
+  buscarPartida();
   tft.init();
   tft.setRotation(1);        // 0 a 3. Use 1 ou 3 para paisagem (320x240)
   tft.fillScreen(TFT_BLACK); // limpa a tela
-  Serial.begin(115200);
 
   tft.init();
   tft.setRotation(1); // ajuste se a orientação sair errada
@@ -198,8 +301,6 @@ void setup() {
   telaInicial();
 }
 
-int placarA = 0;
-int placarB = 0;
 
 // Redesenha só os números, sem limpar a tela toda
 void atualizarPlacar() {
@@ -218,6 +319,10 @@ void atualizarPlacar() {
 
 void loop() {
   // Touch: escolher o modo na tela inicial
+  if(millis() - ultimaConsulta > 3000 && (telaAtual == 0 || !timerRodando)){
+      ultimaConsulta = millis();
+      buscarPartida();
+  }
   if (ts.touched()) {
     TS_Point p = ts.getPoint();
     int x = map(p.x, 200, 3700, 1, 320);
@@ -230,7 +335,7 @@ void loop() {
         placarB = 0;
         periodo = 1;
         zerarTimer();
-        desenharPlacarFutebol("gremio", "inter", placarA, placarB, 0, 0);
+        desenharPlacarFutebol(nomeA, nomeB, placarA, placarB, 0, 0);
       } else if (tocouEm(x, y, 110, 80, 105, 40)) { // Basquete
         telaAtual = 2;
         desenharBola();
