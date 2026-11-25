@@ -1,0 +1,252 @@
+ROTEIRO - O QUE FALTA PARA O PROJETO (FERRAMENTAS SUGERIDAS DA DISCIPLINA)
+Atualizado em 25/11/2026
+================================================================
+Base: Ferramentas.pdf (UFSM00278 - Projeto Integrador II) + estado do
+código em 25/11 (futebol, basquete e vôlei feitos; HTML + Supabase ok).
+
+
+----------------------------------------------------------------
+SITUAÇÃO HOJE
+----------------------------------------------------------------
+  Ferramenta do PDF         Situação
+  ------------------------  --------------------------------------------
+  1. Git / GitHub           EM USO. Commits de 3 integrantes. Falta README.
+  2. Ubuntu Server          FALTA
+  3. ElegantOTA             FALTA
+  4. Grafana                FALTA
+  5. InfluxDB               FALTA
+  6. Node-RED               FALTA
+  7. ZeroTier               FALTA
+  8. Tinkercad              PARCIAL. Tem a carcaça em STL; falta o circuito.
+
+Não é obrigatório usar todas, mas cada uma pode ter um papel real no
+placar. A proposta abaixo encaixa todas sem mudar o que já funciona.
+
+
+----------------------------------------------------------------
+ARQUITETURA PROPOSTA
+----------------------------------------------------------------
+
+  [Celular / HTML] --config--> [Supabase] <--lê config / envia eventos-- [ESP32]
+                                    |                                     ^
+                                    | Node-RED busca eventos a cada 5 s   | OTA (ElegantOTA)
+                                    v                                     | pela rede local
+               [Servidor Ubuntu: Node-RED -> InfluxDB -> Grafana]
+                                    ^
+                                    | ZeroTier: o grupo acessa o servidor de qualquer lugar
+
+- O ESP continua falando SÓ com o Supabase (já funciona, é HTTPS, passa
+  por qualquer rede). Ele não precisa saber que o servidor existe.
+- O ESP32 não roda ZeroTier (não tem biblioteca prática). O ZeroTier fica
+  no servidor e nos notebooks do grupo.
+- O Supabase vira a "caixa de entrada" e o InfluxDB o histórico para
+  gráficos.
+
+
+================================================================
+FASE 0 - CORREÇÕES URGENTES (antes de qualquer coisa)
+================================================================
+1. BOTAO_D está no IO21 = LUZ DE FUNDO DA TELA (TFT_BL 21 no User_Setup.h).
+   - pinMode(21, INPUT_PULLUP) brigando com a TFT_eSPI: a tela pode
+     apagar/piscar, e apertar o botão aterra a luz de fundo.
+   - BOTAO_E está no IO16 = LED RGB da placa (já na lista de "evitar").
+   Solução recomendada: expansor PCF8574 (I2C) com TODOS os botões nele.
+     - SDA = IO22, SCL = IO27 (os dois pinos livres do CN1).
+     - 8 entradas: cabem A, B, C, D, E e sobram 3 (ex.: voltar ao menu).
+     - Libera o IO35 e acaba com o resistor externo.
+     - Biblioteca: "PCF8574" (Rob Tillaart) ou ler direto com Wire.h.
+   Alternativa sem hardware novo: botões D e E viram botões de toque
+   na tela (correções e faltas não precisam ser rápidos como um gol).
+
+2. Chamadas de rede travam o jogo (cada HTTPS leva ~1 s). Hoje isso foi
+   contornado consultando só com o relógio parado, mas a Fase 4 vai
+   precisar enviar eventos DURANTE o jogo.
+   Solução: uma tarefa FreeRTOS no núcleo 0 só para rede
+   (xTaskCreatePinnedToCore). O loop() da tela põe os eventos numa fila
+   (xQueueSend) e a tarefa de rede envia sem atrapalhar o relógio.
+   A consulta da config também vai para essa tarefa.
+
+3. Esquema de partição: o programa está em ~82% e a OTA PRECISA de dois
+   espaços de app. NÃO usar "Huge APP (No OTA)".
+   Usar: Ferramentas -> Partition Scheme -> "Minimal SPIFFS (1.9MB APP with OTA)".
+
+
+================================================================
+FASE 1 - TERMINAR O PLACAR
+================================================================
+- Telas de tênis, jiu-jitsu e padel (funções ainda vazias).
+- Ligar os botões Tenis / JiuJitsu / Padel na tela inicial.
+- aplicarPartida(): tratar "tenis", "jiujitsu" e "padel".
+- Botão/toque para voltar à tela inicial.
+- Futebol: acréscimos (45:00 +2:13) e faltas (parâmetros já existem).
+- Wi-Fi: se não conectar no início, tentar de novo de tempos em tempos
+  sem bloquear (WiFi.reconnect() com millis()).
+- Supabase gratuito pausa após ~7 dias sem uso: abrir o painel antes
+  de apresentar.
+
+
+================================================================
+FASE 2 - ELEGANTOTA (atualizar o ESP pelo Wi-Fi)
+================================================================
+Por que: com o placar fechado na carcaça 3D, não precisa abrir para
+ligar o USB.
+
+1. Instalar a biblioteca "ElegantOTA" (ayushsharma82) no Library Manager.
+2. Usar o WebServer.h que já vem no ESP32:
+     #include <WebServer.h>
+     #include <ElegantOTA.h>
+     WebServer servidor(80);
+   No setup, depois do Wi-Fi:
+     ElegantOTA.begin(&servidor);
+     ElegantOTA.setAuth(OTA_USUARIO, OTA_SENHA);   // no segredos.h
+     servidor.begin();
+   No loop:
+     servidor.handleClient();
+     ElegantOTA.loop();
+3. Adicionar OTA_USUARIO e OTA_SENHA no segredos.h E no
+   segredos_exemplo.h (com valores falsos).
+4. Mostrar o IP num canto da tela inicial (fica fácil achar).
+5. Gerar o .bin: Sketch -> Export Compiled Binary.
+   Abrir http://IP_DO_ESP/update no navegador e enviar o .bin.
+6. Teste: mudar um texto da tela inicial, atualizar pelo navegador,
+   ver a mudança sem cabo.
+Limite: só funciona na mesma rede do ESP (ver ZeroTier na Fase 3).
+
+
+================================================================
+FASE 3 - SERVIDOR UBUNTU + ZEROTIER
+================================================================
+Onde rodar o Ubuntu Server (escolher um):
+  a) Máquina virtual (VirtualBox) no notebook de alguém. Mais fácil.
+  b) PC velho / Raspberry Pi. Fica ligado direto.
+  c) VM gratuita na nuvem (ex.: Oracle Cloud Always Free).
+
+1. Instalar Ubuntu Server, depois Docker e o plugin docker compose.
+2. Criar a pasta servidor/ no repositório com um docker-compose.yml
+   que sobe 3 serviços:
+     - influxdb:2   (porta 8086)
+     - grafana      (porta 3000)
+     - nodered      (porta 1880)
+   Senhas e tokens num servidor/.env, que vai no .gitignore.
+   Versionar só um servidor/.env.exemplo.
+3. ZeroTier:
+   - Criar uma rede em my.zerotier.com (grátis), anotar o Network ID.
+   - Instalar no servidor e nos notebooks do grupo:
+       curl -s https://install.zerotier.com | sudo bash
+       sudo zerotier-cli join <NETWORK_ID>
+   - Autorizar cada máquina no painel do ZeroTier.
+   - Resultado: todo mundo abre o Grafana/Node-RED pelo IP do ZeroTier
+     (ex.: http://10.147.x.x:3000), mesmo em casa ou na rede da UFSM.
+   - Bônus: se o servidor estiver na mesma rede do placar, ele pode
+     repassar a OTA (o grupo atualiza o ESP de longe).
+
+
+================================================================
+FASE 4 - EVENTOS DA PARTIDA (ESP -> SUPABASE)
+================================================================
+Hoje os dados só vão do celular para o ESP. Para ter gráficos, o ESP
+precisa mandar o que acontece no jogo.
+
+1. Nova tabela no Supabase, "eventos":
+     id, partida_id, placar_id, tipo, time, placar_a, placar_b,
+     tempo_jogo_s, created_at
+   tipo: 'inicio', 'ponto', 'correcao', 'falta', 'pausa',
+         'fim_periodo', 'fim'
+   time: 'A', 'B' ou vazio
+2. Segurança igual à das partidas: RLS ligado, leitura pública e
+   gravação só por função registrar_evento(p_token, ...), que confere
+   um token do placar (tabela segredos, como o PIN).
+   O token vai no segredos.h.
+3. Nova tabela "telemetria" (a cada 60 s):
+     rssi (sinal do Wi-Fi), heap_livre, uptime_s,
+     luz (sensor de luz da placa no IO34, analogRead)
+   É o "dado de sensor" de verdade do projeto, e serve para saber se o
+   placar está online.
+4. No ESP: cada gol/ponto/falta vira um item na fila da tarefa de rede
+   (Fase 0, item 2), que chama a função pelo /rest/v1/rpc/.
+5. Bônus barato: o HTML mostra o placar AO VIVO lendo o último evento
+   (era a "Etapa 5" do roteiro_supabase).
+
+
+================================================================
+FASE 5 - NODE-RED (Supabase -> InfluxDB)
+================================================================
+Fluxo principal:
+  [inject a cada 5 s] -> [http request: GET /rest/v1/eventos?id=gt.ULTIMO]
+    -> [split] -> [function: monta o ponto do Influx] -> [influxdb out]
+- Guardar o último id lido no contexto do fluxo (flow.set / flow.get).
+- Mesmo fluxo para a tabela telemetria.
+- Paleta extra: node-red-contrib-influxdb.
+- Exportar o fluxo (Menu -> Export -> JSON) para servidor/nodered/flows.json
+  no repositório.
+
+Automações (escolher 1 ou 2 para mostrar):
+- Placar offline: se não chegar telemetria em 3 min, avisar
+  (e-mail/Telegram).
+- Fim de jogo: mandar o resultado final numa mensagem.
+
+
+================================================================
+FASE 6 - INFLUXDB
+================================================================
+- Bucket "placar".
+- Measurement "evento":
+    tags:   placar_id, partida_id, modo, tipo, time
+    fields: placar_a, placar_b, tempo_jogo_s
+- Measurement "telemetria":
+    tags:   placar_id
+    fields: rssi, heap_livre, uptime_s, luz
+- Criar um token só de escrita para o Node-RED e um só de leitura
+  para o Grafana.
+
+
+================================================================
+FASE 7 - GRAFANA (dashboards)
+================================================================
+- Data source: InfluxDB (linguagem Flux), com o token de leitura.
+- Painéis sugeridos:
+    - Placar atual (Stat): nomes + pontos da partida em andamento.
+    - Evolução do placar na partida (Time series: placar_a x placar_b).
+    - Pontos por minuto / momento de cada gol.
+    - Partidas por esporte (Bar chart).
+    - Saúde do placar: sinal Wi-Fi, memória livre, luz ambiente,
+      online/offline.
+- Alerta no Grafana: placar sem telemetria há 3 min.
+- Exportar o dashboard (JSON) para servidor/grafana/ no repositório.
+
+
+================================================================
+FASE 8 - TINKERCAD, DOCUMENTAÇÃO E ENTREGA
+================================================================
+- Circuito: o Tinkercad Circuits NÃO tem ESP32 (só Arduino Uno e
+  micro:bit). Opções: montar no Wokwi (wokwi.com, tem ESP32 e tela
+  ILI9341) ou desenhar o esquema no Tinkercad com o Uno representando
+  a placa. Documentar os botões, o PCF8574 e as ligações.
+- Carcaça 3D: conferir furos para os botões, o USB e a alimentação.
+- README.md: o que é o projeto, a arquitetura (diagrama acima), como
+  compilar, como preencher o segredos.h, como subir o servidor.
+- Git: cada integrante commitando a própria parte (a disciplina usa
+  isso como registro de contribuição). Usar uma tag por entrega
+  (git tag v1.0).
+- Relatório final: uma tabela "ferramenta do PDF -> como foi usada".
+
+
+----------------------------------------------------------------
+ORDEM SUGERIDA
+----------------------------------------------------------------
+  Fase 0 -> Fase 1 -> Fase 2 (OTA, rápida e independente)
+         -> Fase 3 -> Fase 4 -> Fase 5 -> Fase 6 -> Fase 7 -> Fase 8
+As Fases 1, 2 e 3 podem andar em paralelo, com pessoas diferentes.
+O servidor (Fase 3) não depende do ESP.
+
+
+----------------------------------------------------------------
+TESTE FINAL (apresentação)
+----------------------------------------------------------------
+1. Celular envia a partida -> o placar muda.
+2. Botões marcam pontos -> o Grafana mostra o placar subindo em
+   poucos segundos.
+3. Desligar o roteador -> o placar continua; ao voltar, os eventos da
+   fila são enviados.
+4. Atualizar o ESP pelo navegador (OTA) na frente da banca.
+5. Abrir o Grafana de outro lugar pelo ZeroTier.

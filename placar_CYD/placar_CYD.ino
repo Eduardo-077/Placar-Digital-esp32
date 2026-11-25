@@ -21,8 +21,14 @@ TFT_eSPI tft = TFT_eSPI();
 #define BOTAO_A 22  // +1 Ponto Time A (Todos os esportes)
 #define BOTAO_B 27  // +1 Ponto Time B (Todos os esportes)
 #define BOTAO_C 35  // Reset de Quarto/Set (Basquete / Vôlei)
-#define BOTAO_D 21  // Falta A (Basquete) / -1 Ponto A (Vôlei)
-#define BOTAO_E 16  // Falta B (Basquete) / -1 Ponto B (Vôlei)
+
+// D e E são botões de TOQUE na tela (não são pinos): o IO21 é a luz de fundo
+// da tela e o IO16 é o LED RGB, não dá para ligar botão neles.
+// Quando chegar o PCF8574, todos os botões passam para ele (ver apertou()).
+#define BOTAO_D 100 // Falta A (Basquete) / -1 Ponto A (Vôlei)
+#define BOTAO_E 101 // Falta B (Basquete) / -1 Ponto B (Vôlei)
+bool toqueD = false;              // marcado pelo toque, consumido por apertou()
+bool toqueE = false;
 
 SPIClass touchSPI = SPIClass(VSPI);
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
@@ -42,8 +48,6 @@ const unsigned long DURACAO_QUARTO = 10UL * 60 * 1000;  // 10 min em ms (Basquet
 String nomeA = "CASA";
 String nomeB = "VISITANTE";
 String modoAtual = "futebol";
-long ultimoId = -1;               // id da última partida lida (-1 = nenhuma ainda)
-unsigned long ultimaConsulta = 0; 
 
 int placarA = 0;
 int placarB = 0;
@@ -58,6 +62,20 @@ bool setEncerrado = false;
 // 2. REDE (WI-FI E SUPABASE)
 // ============================================================================
 void aplicarPartida(String modo, String timeA, String timeB); // Protótipo
+
+// A rede roda numa tarefa separada, no núcleo 0 (tarefaRede), para o loop()
+// nunca ficar esperando a internet. Regra: SÓ o loop() (núcleo 1) mexe na
+// tela e nas variáveis do jogo. A tarefa de rede só deixa a partida nova
+// nesta fila ("caixa de correio"), e o loop() decide quando aplicar.
+struct Partida {
+  bool primeira;                  // leitura ao ligar: só guarda os nomes
+  bool substituir;                // true = aplica mesmo com jogo rodando
+  char modo[12];
+  char timeA[25];                 // 12 letras (até 2 bytes cada, se tiver acento)
+  char timeB[25];
+};
+QueueHandle_t filaPartidas;       // tamanho 1: sempre guarda só a mais recente
+long ultimoId = -1;               // id da última partida lida (só a tarefa de rede usa)
 
 void conectarWiFi(){
   Serial.println("Conectando no wifi");
@@ -109,22 +127,38 @@ void buscarPartida() {
       long id = p["id"];
 
       if (id != ultimoId) {
-        bool primeiraLeitura = (ultimoId == -1);
+        Partida nova;
+        nova.primeira = (ultimoId == -1);   // ao ligar: não pula direto para o jogo
+        nova.substituir = p["substituir"] | false;
+        strlcpy(nova.modo,  p["modo"]   | "", sizeof(nova.modo));
+        strlcpy(nova.timeA, p["time_a"] | "", sizeof(nova.timeA));
+        strlcpy(nova.timeB, p["time_b"] | "", sizeof(nova.timeB));
         ultimoId = id;
 
-        if (primeiraLeitura) {
-          // ao ligar: só guarda os nomes, não pula direto para o jogo
-          nomeA = p["time_a"].as<String>();
-          nomeB = p["time_b"].as<String>();
-          Serial.println("Partida atual: " + nomeA + " x " + nomeB);
-        } else {
-          Serial.println("Partida nova!");
-          aplicarPartida(p["modo"].as<String>(), p["time_a"].as<String>(), p["time_b"].as<String>());
-        }
+        Serial.printf("%s %s x %s\n", nova.primeira ? "Partida atual:" : "Partida nova!",
+                      nova.timeA, nova.timeB);
+        xQueueOverwrite(filaPartidas, &nova);   // se já tinha uma esperando, troca pela nova
       }
     }
   }
   http.end();
+}
+
+// Roda para sempre no núcleo 0: Wi-Fi + consulta ao Supabase a cada 3 s.
+// Pode demorar à vontade (delay, HTTPS), porque não trava a tela nem os botões.
+void tarefaRede(void *parametro) {
+  conectarWiFi();
+  for (;;) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Sem Wi-Fi, tentando de novo...");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_NOME, WIFI_SENHA);
+      delay(10000);               // dá tempo de conectar antes de tentar de novo
+      continue;
+    }
+    buscarPartida();
+    delay(3000);
+  }
 }
 
 
@@ -162,6 +196,39 @@ void zerarTimer() {
 // ============================================================================
 bool tocouEm(int x, int y, int bx, int by, int bw, int bh){
   return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+// Retorna true uma vez por aperto (espera soltar o botão).
+// É o ÚNICO lugar que lê os botões: para trocar pelo PCF8574, basta mudar
+// esta função (ex.: digitalRead(botao) vira pcf.read(botao)).
+bool apertou(int botao) {
+  if (botao == BOTAO_D) { bool t = toqueD; toqueD = false; return t; }
+  if (botao == BOTAO_E) { bool t = toqueE; toqueE = false; return t; }
+
+  if (digitalRead(botao) != LOW) return false;
+  while (digitalRead(botao) == LOW) delay(10);   // espera soltar
+  delay(50);
+  return true;
+}
+
+// Desenha os botões de toque D (esquerda) e E (direita) no rodapé da tela
+void desenharBotoesToque(String texto) {
+  tft.setTextSize(2);
+  tft.setTextDatum(MC_DATUM);              // x, y = centro do texto
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawRoundRect(40, 205, 80, 30, 8, TFT_DARKGREY);
+  tft.drawString(texto, 80, 220);
+  tft.drawRoundRect(200, 205, 80, 30, 8, TFT_DARKGREY);
+  tft.drawString(texto, 240, 220);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Toque no rodapé: metade esquerda = botão D, metade direita = botão E.
+// Retorna true se o toque foi num desses botões.
+bool tocouBotoesToque(int x, int y) {
+  if (tocouEm(x, y, 0, 195, 160, 45))   { toqueD = true; return true; }
+  if (tocouEm(x, y, 160, 195, 160, 45)) { toqueE = true; return true; }
+  return false;
 }
 
 void desenharBola(){
@@ -345,12 +412,12 @@ void atualizarFaltasBasquete() {
   uint16_t corA = (faltasA >= 5) ? TFT_RED : TFT_WHITE;
   tft.setTextColor(corA, TFT_BLACK);
   tft.setTextPadding(tft.textWidth("FALTAS: 99"));
-  tft.drawString("FALTAS: " + String(faltasA), 80, 195);
+  tft.drawString("FALTAS: " + String(faltasA), 80, 180);
 
   uint16_t corB = (faltasB >= 5) ? TFT_RED : TFT_WHITE;
   tft.setTextColor(corB, TFT_BLACK);
   tft.setTextPadding(tft.textWidth("FALTAS: 99"));
-  tft.drawString("FALTAS: " + String(faltasB), 240, 195);
+  tft.drawString("FALTAS: " + String(faltasB), 240, 180);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextPadding(0);
@@ -388,6 +455,7 @@ void desenharPlacarBasquete(String timeA, String timeB, int placarA, int placarB
 
   atualizarPlacarBasquete();
   atualizarFaltasBasquete();
+  desenharBotoesToque("FALTA");
   desenharTimerBasquete();
 }
 
@@ -422,8 +490,8 @@ void atualizarSetsVolei() {
   tft.setTextPadding(tft.textWidth("SETS: 9"));
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("SETS: " + String(setsA), 80, 195);
-  tft.drawString("SETS: " + String(setsB), 240, 195);
+  tft.drawString("SETS: " + String(setsA), 80, 180);
+  tft.drawString("SETS: " + String(setsB), 240, 180);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextPadding(0);
@@ -480,6 +548,7 @@ void desenharPlacarVolei(String timeA, String timeB, int setAtual){
   desenharTopoVolei();
   atualizarPontosVolei();
   atualizarSetsVolei();
+  desenharBotoesToque("-1");
 }
 
 
@@ -492,6 +561,14 @@ void desenharPlacarTenis(String timeA, String timeB, int setsA, int setsB){
 
 void desenharPlacarJiuJitsu(String lutadorA, String lutadorB, int punicoesA, int punicoesB, int vantagensA, int vantagensB){
 
+}
+
+// Jogo sem nada a perder: dá para trocar de partida sem apagar um jogo rodando.
+// Menu, relógio pausado (futebol/basquete) ou, no vôlei, set encerrado / 0 x 0.
+bool jogoParado() {
+  if (telaAtual == 0) return true;
+  if (telaAtual == 3) return setEncerrado || (placarA == 0 && placarB == 0);
+  return !timerRodando;
 }
 
 void aplicarPartida(String modo, String timeA, String timeB){
@@ -529,8 +606,6 @@ void aplicarPartida(String modo, String timeA, String timeB){
 // ============================================================================
 void setup() {
   Serial.begin(115200);
-  conectarWiFi();
-  buscarPartida();
   tft.init();
   tft.setRotation(1);        // 0 a 3. Use 1 ou 3 para paisagem (320x240)
   tft.fillScreen(TFT_BLACK); // limpa a tela
@@ -542,17 +617,27 @@ void setup() {
   pinMode(BOTAO_A, INPUT_PULLUP);
   pinMode(BOTAO_B, INPUT_PULLUP);
   pinMode(BOTAO_C, INPUT);        // pull-up é o resistor externo
-  pinMode(BOTAO_D, INPUT_PULLUP); // Falta A (Basquete) / -1 Ponto A (Vôlei)
-  pinMode(BOTAO_E, INPUT_PULLUP); // Falta B (Basquete) / -1 Ponto B (Vôlei)
+  // BOTAO_D e BOTAO_E são de toque: sem pinMode
+
+  // Rede no núcleo 0 (o loop() roda no núcleo 1). 12 KB de pilha: o HTTPS usa bastante.
+  filaPartidas = xQueueCreate(1, sizeof(Partida));
+  xTaskCreatePinnedToCore(tarefaRede, "rede", 12288, NULL, 1, NULL, 0);
   
   telaInicial();
 }
 
 void loop() {
-  // Consulta periódica ao Supabase quando parado ou no menu
-  if(millis() - ultimaConsulta > 3000 && (telaAtual == 0 || !timerRodando)){
-      ultimaConsulta = millis();
-      buscarPartida();
+  // Partida nova deixada na fila pela tarefa de rede (não espera nada)
+  Partida nova;
+  if (xQueuePeek(filaPartidas, &nova, 0) == pdTRUE) {
+    if (nova.primeira) {                           // ao ligar: só guarda os nomes
+      xQueueReceive(filaPartidas, &nova, 0);
+      nomeA = nova.timeA;
+      nomeB = nova.timeB;
+    } else if (nova.substituir || jogoParado()) {  // senão, fica esperando na fila
+      xQueueReceive(filaPartidas, &nova, 0);
+      aplicarPartida(nova.modo, nova.timeA, nova.timeB);
+    }
   }
 
   // --- LEITURA DO TOUCH (Menu Inicial e Play/Pause nos cronômetros) ---
@@ -596,11 +681,13 @@ void loop() {
         }
       } else if (timerRodando) pausarTimer();
       else iniciarTimer();
-    } else if (telaAtual == 2) {                     // Basquete: toque = play/pausa
-      if (!tempoAcabouBasquete()) {
+    } else if (telaAtual == 2) {                     // Basquete: botões FALTA ou play/pausa
+      if (!tocouBotoesToque(x, y) && !tempoAcabouBasquete()) {
         if (timerRodando) pausarTimer();
         else iniciarTimer();
       }
+    } else if (telaAtual == 3) {                     // Vôlei: botões -1
+      tocouBotoesToque(x, y);
     }
 
     while (ts.touched()) delay(10);   // espera tirar o dedo
@@ -610,17 +697,13 @@ void loop() {
   // --- CONTROLES: FUTEBOL (telaAtual == 1) ---
   if (telaAtual == 1) {
     desenharTimer();
-    if (digitalRead(BOTAO_A) == LOW) {
+    if (apertou(BOTAO_A)) {
       placarA++;
       atualizarPlacar();
-      while (digitalRead(BOTAO_A) == LOW) delay(10);
-      delay(50);
     }
-    if (digitalRead(BOTAO_B) == LOW) {
+    if (apertou(BOTAO_B)) {
       placarB++;
       atualizarPlacar();
-      while (digitalRead(BOTAO_B) == LOW) delay(10);
-      delay(50);
     }
   }
 
@@ -628,73 +711,59 @@ void loop() {
   if (telaAtual == 2) {
     desenharTimerBasquete();
 
-    if (digitalRead(BOTAO_A) == LOW) {
+    if (apertou(BOTAO_A)) {
       placarA++;
       atualizarPlacarBasquete();
-      while (digitalRead(BOTAO_A) == LOW) delay(10);
-      delay(50);
     }
-    if (digitalRead(BOTAO_B) == LOW) {
+    if (apertou(BOTAO_B)) {
       placarB++;
       atualizarPlacarBasquete();
-      while (digitalRead(BOTAO_B) == LOW) delay(10);
-      delay(50);
     }
-    if (digitalRead(BOTAO_C) == LOW) {
+    if (apertou(BOTAO_C)) {
       faltasA = 0;
       faltasB = 0;
       periodo++;
       zerarTimer();
       atualizarFaltasBasquete();
       desenharTimerBasquete();
-      while (digitalRead(BOTAO_C) == LOW) delay(10);
-      delay(50);
     }
-    if (digitalRead(BOTAO_D) == LOW) {
+    if (apertou(BOTAO_D)) {
       faltasA++;
       atualizarFaltasBasquete();
-      while (digitalRead(BOTAO_D) == LOW) delay(10);
-      delay(50);
     }
-    if (digitalRead(BOTAO_E) == LOW) {
+    if (apertou(BOTAO_E)) {
       faltasB++;
       atualizarFaltasBasquete();
-      while (digitalRead(BOTAO_E) == LOW) delay(10);
-      delay(50);
     }
   }
 
   // --- CONTROLES: VÔLEI (telaAtual == 3) ---
   if (telaAtual == 3) {
     // +1 Ponto Time A
-    if (digitalRead(BOTAO_A) == LOW && !setEncerrado && setsA < 3 && setsB < 3) {
+    // apertou() vem primeiro no if: assim o aperto é sempre consumido,
+    // mesmo quando a ação não vale (ex.: set já encerrado)
+    if (apertou(BOTAO_A) && !setEncerrado && setsA < 3 && setsB < 3) {
       placarA++;
       atualizarPontosVolei();
       verificarFimSetVolei();
-      while (digitalRead(BOTAO_A) == LOW) delay(10);
-      delay(50);
     }
     // +1 Ponto Time B
-    if (digitalRead(BOTAO_B) == LOW && !setEncerrado && setsA < 3 && setsB < 3) {
+    if (apertou(BOTAO_B) && !setEncerrado && setsA < 3 && setsB < 3) {
       placarB++;
       atualizarPontosVolei();
       verificarFimSetVolei();
-      while (digitalRead(BOTAO_B) == LOW) delay(10);
-      delay(50);
     }
     // BOTAO_C: Iniciar próximo set (zera pontos do set e avança para o próximo)
-    if (digitalRead(BOTAO_C) == LOW && setsA < 3 && setsB < 3) {
+    if (apertou(BOTAO_C) && setsA < 3 && setsB < 3) {
       if (periodo < 5) periodo++;
       placarA = 0;
       placarB = 0;
       setEncerrado = false;
       atualizarPontosVolei();
       desenharTopoVolei();
-      while (digitalRead(BOTAO_C) == LOW) delay(10);
-      delay(50);
     }
-    // BOTAO_D: -1 Ponto Time A (Correção)
-    if (digitalRead(BOTAO_D) == LOW && placarA > 0) {
+    // BOTAO_D (toque): -1 Ponto Time A (Correção)
+    if (apertou(BOTAO_D) && placarA > 0) {
       if (setEncerrado && placarA > placarB) {
         setsA--;
         setEncerrado = false;
@@ -703,11 +772,9 @@ void loop() {
       }
       placarA--;
       atualizarPontosVolei();
-      while (digitalRead(BOTAO_D) == LOW) delay(10);
-      delay(50);
     }
-    // BOTAO_E: -1 Ponto Time B (Correção)
-    if (digitalRead(BOTAO_E) == LOW && placarB > 0) {
+    // BOTAO_E (toque): -1 Ponto Time B (Correção)
+    if (apertou(BOTAO_E) && placarB > 0) {
       if (setEncerrado && placarB > placarA) {
         setsB--;
         setEncerrado = false;
@@ -716,8 +783,6 @@ void loop() {
       }
       placarB--;
       atualizarPontosVolei();
-      while (digitalRead(BOTAO_E) == LOW) delay(10);
-      delay(50);
     }
   }
 }

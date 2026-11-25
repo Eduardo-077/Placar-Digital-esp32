@@ -29,6 +29,9 @@
     width: 100%; padding: 12px; font: inherit; font-size: 1.1rem; font-weight: 400;
     color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px;
   }
+  .opcao { grid-template-columns: auto 1fr; align-items: start; gap: 10px; cursor: pointer; }
+  .opcao input { width: 22px; height: 22px; margin: 0; padding: 0; accent-color: var(--accent); }
+  .opcao small { display: block; font-weight: 400; color: var(--muted); font-size: .9rem; margin-top: 2px; }
   .times { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: end; }
   .x { font-size: 1.5rem; font-weight: 700; color: var(--muted); padding-bottom: 10px; }
   button {
@@ -81,6 +84,13 @@
       <input id="pin" type="password" inputmode="numeric" autocomplete="off" required>
     </label>
 
+    <label class="opcao">
+      <input id="substituir" type="checkbox">
+      <span>Substituir o jogo em andamento
+        <small>Desmarcado: a partida espera o jogo atual ser pausado ou o set acabar.</small>
+      </span>
+    </label>
+
     <button id="enviar" type="submit">Enviar para o placar</button>
   </form>
   <p class="msg" id="msg" role="status"></p>
@@ -127,11 +137,12 @@ function traduzirErro(e) {
   return "Erro: " + (m || "sem conexão com o servidor.");
 }
 
-async function enviarPartida(pin, modo, timeA, timeB) {
+async function enviarPartida(pin, modo, timeA, timeB, substituir) {
   const r = await fetch(SUPABASE_URL + "/rest/v1/rpc/enviar_partida", {
     method: "POST",
     headers: cabecalhos,
-    body: JSON.stringify({ p_pin: pin, p_modo: modo, p_time_a: timeA, p_time_b: timeB })
+    body: JSON.stringify({ p_pin: pin, p_modo: modo, p_time_a: timeA, p_time_b: timeB,
+                           p_substituir: substituir })
   });
   if (!r.ok) throw await r.json();
 }
@@ -170,14 +181,16 @@ document.getElementById("form").addEventListener("submit", async (e) => {
   const timeB = limparNome(document.getElementById("time-b").value);
   const modo = document.getElementById("modo").value;
   const pin = document.getElementById("pin").value;
+  const substituir = document.getElementById("substituir").checked;
 
   if (!timeA || !timeB) { mostrar("Preencha o nome dos dois times.", "erro"); return; }
 
   $enviar.disabled = true;
   mostrar("Enviando...", "");
   try {
-    await enviarPartida(pin, modo, timeA, timeB);
-    mostrar("Enviado! O placar muda em poucos segundos.", "ok");
+    await enviarPartida(pin, modo, timeA, timeB, substituir);
+    mostrar(substituir ? "Enviado! O placar muda em poucos segundos."
+                       : "Enviado! Entra quando o jogo atual for pausado.", "ok");
     atualizarAtual();
   } catch (e) {
     mostrar(traduzirErro(e), "erro");
