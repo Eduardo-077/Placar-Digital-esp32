@@ -4,12 +4,14 @@
 -- funcionando com a função nova (substituir fica false).
 
 -- 1) Nova coluna: true = o placar troca na hora, mesmo com jogo rodando
+--    (o "if not exists" deixa rodar o script de novo sem erro)
 alter table public.partidas
-  add column substituir boolean not null default false;
+  add column if not exists substituir boolean not null default false;
 
 -- 2) Troca a função por uma com o parâmetro novo.
 --    A antiga precisa sair: com as duas, o Supabase não saberia qual chamar.
-drop function public.enviar_partida(text, text, text, text);
+drop function if exists public.enviar_partida(text, text, text, text);
+drop function if exists public.enviar_partida(text, text, text, text, boolean);
 
 create function public.enviar_partida(
   p_pin text, p_modo text, p_time_a text, p_time_b text,
@@ -40,6 +42,9 @@ $$;
 
 revoke execute on function public.enviar_partida(text, text, text, text, boolean) from public, authenticated;
 grant execute on function public.enviar_partida(text, text, text, text, boolean) to anon;
+
+-- 3) Avisa a API do Supabase que a tabela e a função mudaram
+notify pgrst, 'reload schema';
 
 -- Teste (deve retornar o id novo):
 -- set role anon;

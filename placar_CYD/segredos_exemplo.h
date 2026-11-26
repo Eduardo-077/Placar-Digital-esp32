@@ -15,3 +15,7 @@
 
 // Identificador deste placar na tabela partidas
 #define PLACAR_ID  "placar01"
+
+// Login da página de atualização (http://IP_DO_PLACAR/update)
+#define OTA_USUARIO  "admin"
+#define OTA_SENHA    "troque_esta_senha"

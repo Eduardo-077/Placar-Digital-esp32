@@ -44,31 +44,26 @@ ARQUITETURA PROPOSTA
 
 
 ================================================================
-FASE 0 - CORREÇÕES URGENTES (antes de qualquer coisa)
+FASE 0 - CORREÇÕES URGENTES  [CONCLUÍDA em 25/11/2026]
 ================================================================
-1. BOTAO_D está no IO21 = LUZ DE FUNDO DA TELA (TFT_BL 21 no User_Setup.h).
-   - pinMode(21, INPUT_PULLUP) brigando com a TFT_eSPI: a tela pode
-     apagar/piscar, e apertar o botão aterra a luz de fundo.
-   - BOTAO_E está no IO16 = LED RGB da placa (já na lista de "evitar").
-   Solução recomendada: expansor PCF8574 (I2C) com TODOS os botões nele.
-     - SDA = IO22, SCL = IO27 (os dois pinos livres do CN1).
-     - 8 entradas: cabem A, B, C, D, E e sobram 3 (ex.: voltar ao menu).
-     - Libera o IO35 e acaba com o resistor externo.
-     - Biblioteca: "PCF8574" (Rob Tillaart) ou ler direto com Wire.h.
-   Alternativa sem hardware novo: botões D e E viram botões de toque
-   na tela (correções e faltas não precisam ser rápidos como um gol).
-
-2. Chamadas de rede travam o jogo (cada HTTPS leva ~1 s). Hoje isso foi
-   contornado consultando só com o relógio parado, mas a Fase 4 vai
-   precisar enviar eventos DURANTE o jogo.
-   Solução: uma tarefa FreeRTOS no núcleo 0 só para rede
-   (xTaskCreatePinnedToCore). O loop() da tela põe os eventos numa fila
-   (xQueueSend) e a tarefa de rede envia sem atrapalhar o relógio.
-   A consulta da config também vai para essa tarefa.
-
-3. Esquema de partição: o programa está em ~82% e a OTA PRECISA de dois
-   espaços de app. NÃO usar "Huge APP (No OTA)".
-   Usar: Ferramentas -> Partition Scheme -> "Minimal SPIFFS (1.9MB APP with OTA)".
+1. Botões D e E: saíram do IO21 (luz de fundo) e do IO16 (LED RGB)
+   e viraram botões de TOQUE na tela (rodapé). Tudo passa por
+   apertou(); quando chegar o PCF8574 (I2C, SDA=IO22, SCL=IO27),
+   basta mudar essa função.
+2. Rede numa tarefa FreeRTOS no núcleo 0 (tarefaRede). Ela deixa a
+   partida nova numa fila; só o loop() mexe na tela. O relógio não
+   trava mais esperando o HTTPS. A Fase 4 usa a mesma tarefa para
+   enviar eventos.
+3. Partição: "Minimal SPIFFS (1.9MB APP with OTA)" (pronto para a OTA).
+Também resolvido:
+- Supabase: etapa2_substituir.sql agora pode rodar várias vezes.
+- placar.html mostra o erro real quando o banco está desatualizado.
+Dicas de gravação na CYD:
+- "Wrong boot mode": segurar BOOT, apertar e soltar RST, soltar BOOT
+  quando aparecer "Writing at...".
+- "Invalid head of packet": Upload Speed em 115200 e Serial Monitor
+  fechado.
+- Serial Monitor em 115200 baud (senão aparece texto embaralhado).
 
 
 ================================================================

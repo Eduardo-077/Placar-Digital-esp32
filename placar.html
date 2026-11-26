@@ -130,10 +130,15 @@ function limparNome(nome) {
 // Traduz os erros do banco para algo legível
 function traduzirErro(e) {
   const m = e.message || "";
+  // Função não existe com esses parâmetros: o SQL da etapa 2 não foi rodado
+  if (e.code === "PGRST202") return "Banco desatualizado: rode o supabase/etapa2_substituir.sql.";
   if (m.includes("PIN incorreto")) return "PIN incorreto.";
-  if (m.includes("time_a")) return "Nome do time A inválido (1 a 12 letras).";
-  if (m.includes("time_b")) return "Nome do time B inválido (1 a 12 letras).";
-  if (m.includes("modo")) return "Modo inválido.";
+  // Só erros de "check constraint" falam do nome ou do modo
+  if (e.code === "23514") {
+    if (m.includes("time_a")) return "Nome do time A inválido (1 a 12 letras).";
+    if (m.includes("time_b")) return "Nome do time B inválido (1 a 12 letras).";
+    if (m.includes("modo")) return "Modo inválido.";
+  }
   return "Erro: " + (m || "sem conexão com o servidor.");
 }
 

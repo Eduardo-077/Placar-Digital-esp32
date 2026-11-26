@@ -1,6 +1,11 @@
 // ============================================================================
 // 1. BIBLIOTECAS, PINOS E VARIÁVEIS GLOBAIS
 // ============================================================================
+// WebServer/ElegantOTA PRECISAM vir antes da TFT_eSPI: ela inclui o FS.h
+// com FS_NO_GLOBALS, e aí o WebServer.h não acha o tipo "FS" (erro de compilação).
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <ElegantOTA.h>   // biblioteca "ElegantOTA" (ayushsharma82)
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <XPT2046_Touchscreen.h>
@@ -9,6 +14,10 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+
+#if !defined(OTA_USUARIO) || !defined(OTA_SENHA)
+#error "Adicione OTA_USUARIO e OTA_SENHA no segredos.h (veja o segredos_exemplo.h)"
+#endif
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -76,6 +85,7 @@ struct Partida {
 };
 QueueHandle_t filaPartidas;       // tamanho 1: sempre guarda só a mais recente
 long ultimoId = -1;               // id da última partida lida (só a tarefa de rede usa)
+volatile bool atualizandoOTA = false; // durante a OTA a tarefa de rede fica quieta
 
 void conectarWiFi(){
   Serial.println("Conectando no wifi");
@@ -149,6 +159,10 @@ void buscarPartida() {
 void tarefaRede(void *parametro) {
   conectarWiFi();
   for (;;) {
+    if (atualizandoOTA) {         // não disputa rede/memória com a atualização
+      delay(500);
+      continue;
+    }
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("Sem Wi-Fi, tentando de novo...");
       WiFi.disconnect();
@@ -159,6 +173,92 @@ void tarefaRede(void *parametro) {
     buscarPartida();
     delay(3000);
   }
+}
+
+
+// ============================================================================
+// 2.1 ATUALIZAÇÃO PELO WI-FI (ELEGANTOTA)
+// ============================================================================
+// Abrir http://IP_DO_PLACAR/update (ou http://placar.local/update) no
+// navegador, entrar com OTA_USUARIO/OTA_SENHA e enviar o .bin gerado em
+// Sketch -> Export Compiled Binary. Só funciona na mesma rede do placar.
+// O servidor roda no loop() (núcleo 1), por isso pode desenhar na tela.
+WebServer servidor(80);
+bool servidorIniciado = false;
+int ultimoPorcento = -1;
+
+void desenharIP() {
+  if (telaAtual != 0 || WiFi.status() != WL_CONNECTED) return;
+  tft.setTextSize(1);
+  tft.setTextDatum(BR_DATUM);              // canto inferior direito
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString(WiFi.localIP().toString(), 315, 235);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void inicioOTA() {
+  atualizandoOTA = true;
+  pausarTimer();
+  ultimoPorcento = -1;
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("ATUALIZANDO...", 160, 90);
+  tft.drawRect(40, 120, 240, 20, TFT_WHITE);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void progressoOTA(size_t atual, size_t total) {
+  if (total == 0) return;
+  int porcento = atual * 100 / total;
+  if (porcento == ultimoPorcento) return;  // só redesenha quando muda
+  ultimoPorcento = porcento;
+  tft.fillRect(42, 122, 236 * porcento / 100, 16, TFT_GREEN);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextPadding(tft.textWidth("100%"));
+  tft.drawString(String(porcento) + "%", 160, 150);
+  tft.setTextPadding(0);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void fimOTA(bool sucesso) {
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2);
+  tft.setTextPadding(320);
+  if (sucesso) {                           // ElegantOTA reinicia o ESP sozinho
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("OK! REINICIANDO", 160, 190);
+  } else {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("ERRO NA ATUALIZACAO", 160, 190);
+    atualizandoOTA = false;
+  }
+  tft.setTextPadding(0);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Chamado no loop(): sobe o servidor assim que o Wi-Fi conectar
+// (antes disso a rede do ESP ainda não existe) e depois atende os pedidos.
+void cuidarOTA() {
+  if (!servidorIniciado) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    MDNS.begin("placar");                  // http://placar.local
+    ElegantOTA.begin(&servidor, OTA_USUARIO, OTA_SENHA);
+    ElegantOTA.onStart(inicioOTA);
+    ElegantOTA.onProgress(progressoOTA);
+    ElegantOTA.onEnd(fimOTA);
+    servidor.begin();
+    servidorIniciado = true;
+    Serial.print("OTA pronta: http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("/update");
+    desenharIP();
+  }
+  servidor.handleClient();
+  ElegantOTA.loop();
 }
 
 
@@ -238,7 +338,7 @@ void desenharBola(){
 void telaInicial(){
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
-  tft.drawString("Selecione o modo de jogo", 20, 10);
+  tft.drawString("Escolha o esporte OTA", 20, 10);
   int posy1 = 80;
   int posy2 = 140; 
   //tft.drawRoundRect(posição x, pos y, largura, altura, arredondamento, cor da borda);   
@@ -255,6 +355,7 @@ void telaInicial(){
   tft.drawString("JiuJitsu", 115, posy2 + 10); //x+y= 265
   tft.drawRoundRect(215, posy2, 105, 40, 20, 0x001F);
   tft.drawString("Padel", 240, posy2 + 10);    //x+y=390
+  desenharIP();                                // IP no canto, para achar a OTA
 }
 
 
@@ -627,6 +728,9 @@ void setup() {
 }
 
 void loop() {
+  cuidarOTA();
+  if (atualizandoOTA) return;      // tela é da barra de progresso
+
   // Partida nova deixada na fila pela tarefa de rede (não espera nada)
   Partida nova;
   if (xQueuePeek(filaPartidas, &nova, 0) == pdTRUE) {
