@@ -29,7 +29,12 @@ TFT_eSPI tft = TFT_eSPI();
 
 #define BOTAO_A 22  // +1 Ponto Time A (Todos os esportes)
 #define BOTAO_B 27  // +1 Ponto Time B (Todos os esportes)
-#define BOTAO_C 35  // Reset de Quarto/Set (Basquete / Vôlei)
+#define BOTAO_C 35  // Encerrar tempo / quarto / set, ou desfazer (depende do esporte)
+
+// O IO35 NÃO tem pull-up interno: sem o resistor de 10k (IO35 -> 3.3V) o pino
+// fica "flutuando", lê LOW sozinho e o apertou() trava esperando soltar.
+// Deixe 0 até o resistor estar ligado; aí troque para 1.
+#define BOTAO_C_LIGADO 0
 
 // D e E são botões de TOQUE na tela (não são pinos): o IO21 é a luz de fundo
 // da tela e o IO16 é o LED RGB, não dá para ligar botão neles.
@@ -43,7 +48,7 @@ SPIClass touchSPI = SPIClass(VSPI);
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 
 // Controle de Tela e Tempo
-int telaAtual = 0;                // 0=Menu, 1=Futebol, 2=Basquete, 3=Vôlei
+int telaAtual = 0;                // 0=Menu, 1=Futebol, 2=Basquete, 3=Vôlei, 4=Tênis, 5=Jiu-Jitsu, 6=Padel
 unsigned long inicioTimer = 0;    // millis() de quando deu play
 unsigned long tempoPausado = 0;   // tempo acumulado antes da última pausa
 bool timerRodando = false;
@@ -52,6 +57,8 @@ int periodo = 1;                  // Tempo (Futebol), Quarto (Basquete) ou Set a
 
 const unsigned long DURACAO_TEMPO = 45UL * 60 * 1000;   // 45 min em ms (Futebol)
 const unsigned long DURACAO_QUARTO = 10UL * 60 * 1000;  // 10 min em ms (Basquete)
+const unsigned long DURACAO_LUTA = 5UL * 60 * 1000;     // 5 min em ms (Jiu-Jitsu)
+bool periodoEncerrado = false;    // Futebol: botão C encerrou o tempo (intervalo / fim de jogo)
 
 // Dados da Partida e Pontuações
 String nomeA = "CASA";
@@ -66,11 +73,35 @@ int setsA = 0;
 int setsB = 0;
 bool setEncerrado = false;
 
+// Tênis / Padel (placarA/placarB = pontos do game: 0, 1, 2, 3 = 0, 15, 30, 40)
+int gamesA = 0;
+int gamesB = 0;
+bool tiebreak = false;
+char historicoSets[24] = "";      // sets já jogados, ex.: "6-4 3-6"
+
+// Jiu-Jitsu (placarA/placarB = pontos)
+int vantagensA = 0;
+int vantagensB = 0;
+int punicoesA = 0;
+int punicoesB = 0;
+
+// Desfazer (botão C no tênis, padel e jiu-jitsu): fotos do placar antes de cada ponto
+struct Estado {
+  int placarA, placarB, gamesA, gamesB, setsA, setsB;
+  int vantagensA, vantagensB, punicoesA, punicoesB;
+  bool tiebreak;
+  char historicoSets[24];
+};
+const int MAX_HISTORICO = 30;
+Estado historico[MAX_HISTORICO];
+int nHistorico = 0;
+
 
 // ============================================================================
 // 2. REDE (WI-FI E SUPABASE)
 // ============================================================================
-void aplicarPartida(String modo, String timeA, String timeB); // Protótipo
+void aplicarPartida(String modo, String timeA, String timeB); // Protótipos
+void redesenharTela();
 
 // A rede roda numa tarefa separada, no núcleo 0 (tarefaRede), para o loop()
 // nunca ficar esperando a internet. Regra: SÓ o loop() (núcleo 1) mexe na
@@ -234,10 +265,15 @@ void fimOTA(bool sucesso) {
   } else {
     tft.setTextColor(TFT_RED, TFT_BLACK);
     tft.drawString("ERRO NA ATUALIZACAO", 160, 190);
-    atualizandoOTA = false;
   }
   tft.setTextPadding(0);
   tft.setTextDatum(TL_DATUM);
+
+  if (!sucesso) {                          // mostra o erro e volta para o jogo
+    delay(3000);
+    atualizandoOTA = false;
+    redesenharTela();
+  }
 }
 
 // Chamado no loop(): sobe o servidor assim que o Wi-Fi conectar
@@ -304,6 +340,7 @@ bool tocouEm(int x, int y, int bx, int by, int bw, int bh){
 bool apertou(int botao) {
   if (botao == BOTAO_D) { bool t = toqueD; toqueD = false; return t; }
   if (botao == BOTAO_E) { bool t = toqueE; toqueE = false; return t; }
+  if (botao == BOTAO_C && !BOTAO_C_LIGADO) return false;
 
   if (digitalRead(botao) != LOW) return false;
   while (digitalRead(botao) == LOW) delay(10);   // espera soltar
@@ -323,12 +360,82 @@ void desenharBotoesToque(String texto) {
   tft.setTextDatum(TL_DATUM);
 }
 
+// Faltas do futebol e do basquete, acima dos botões de toque.
+// limite: a partir de quantas faltas fica vermelho (0 = nunca).
+void atualizarFaltas(int limite) {
+  tft.setTextSize(2);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextPadding(tft.textWidth("FALTAS: 99"));
+
+  uint16_t corA = (limite > 0 && faltasA >= limite) ? TFT_RED : TFT_WHITE;
+  tft.setTextColor(corA, TFT_BLACK);
+  tft.drawString("FALTAS: " + String(faltasA), 80, 180);
+
+  uint16_t corB = (limite > 0 && faltasB >= limite) ? TFT_RED : TFT_WHITE;
+  tft.setTextColor(corB, TFT_BLACK);
+  tft.drawString("FALTAS: " + String(faltasB), 240, 180);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+}
+
 // Toque no rodapé: metade esquerda = botão D, metade direita = botão E.
 // Retorna true se o toque foi num desses botões.
 bool tocouBotoesToque(int x, int y) {
   if (tocouEm(x, y, 0, 195, 160, 45))   { toqueD = true; return true; }
   if (tocouEm(x, y, 160, 195, 160, 45)) { toqueE = true; return true; }
   return false;
+}
+
+// Botão MENU no canto superior esquerdo de todas as telas de jogo
+void desenharBotaoMenu() {
+  tft.setTextSize(2);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawRoundRect(4, 4, 52, 26, 6, TFT_DARKGREY);
+  tft.drawString("MENU", 30, 18);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// A área de toque é maior que o desenho, para facilitar acertar o canto
+bool tocouMenu(int x, int y) {
+  return tocouEm(x, y, 0, 0, 70, 40);
+}
+
+void voltarMenu() {
+  telaAtual = 0;
+  zerarTimer();
+  telaInicial();
+}
+
+// Guarda uma foto do placar antes de cada ponto, para o botão C desfazer.
+// Se encher, joga fora a foto mais antiga.
+void salvarEstado() {
+  if (nHistorico == MAX_HISTORICO) {
+    memmove(historico, historico + 1, sizeof(Estado) * (MAX_HISTORICO - 1));
+    nHistorico--;
+  }
+  Estado &e = historico[nHistorico++];
+  e.placarA = placarA;       e.placarB = placarB;
+  e.gamesA = gamesA;         e.gamesB = gamesB;
+  e.setsA = setsA;           e.setsB = setsB;
+  e.vantagensA = vantagensA; e.vantagensB = vantagensB;
+  e.punicoesA = punicoesA;   e.punicoesB = punicoesB;
+  e.tiebreak = tiebreak;
+  strlcpy(e.historicoSets, historicoSets, sizeof(e.historicoSets));
+}
+
+void desfazer() {
+  if (nHistorico == 0) return;
+  Estado &e = historico[--nHistorico];
+  placarA = e.placarA;       placarB = e.placarB;
+  gamesA = e.gamesA;         gamesB = e.gamesB;
+  setsA = e.setsA;           setsB = e.setsB;
+  vantagensA = e.vantagensA; vantagensB = e.vantagensB;
+  punicoesA = e.punicoesA;   punicoesB = e.punicoesB;
+  tiebreak = e.tiebreak;
+  strlcpy(historicoSets, e.historicoSets, sizeof(historicoSets));
+  redesenharTela();
 }
 
 void desenharBola(){
@@ -338,7 +445,7 @@ void desenharBola(){
 void telaInicial(){
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
-  tft.drawString("Escolha o esporte OTA", 20, 10);
+  tft.drawString("Selecione o modo", 20, 10);
   int posy1 = 80;
   int posy2 = 140; 
   //tft.drawRoundRect(posição x, pos y, largura, altura, arredondamento, cor da borda);   
@@ -360,16 +467,23 @@ void telaInicial(){
 
 
 // ============================================================================
-// 5. MÓDULO: FUTEBOL (telaAtual = 1) - Mantido intacto
+// 5. MÓDULO: FUTEBOL (telaAtual = 1)
 // ============================================================================
-bool tempoAcabou() {
-  return tempoDecorrido() >= DURACAO_TEMPO;
-}
-
+// Ao chegar em 45:00 o relógio NÃO para: o tempo extra aparece como acréscimo
+// ("1o T +2:13"). Quem encerra o tempo é o botão C.
 void desenharPeriodo() {
-  const char* texto;
-  if (periodo == 1) texto = tempoAcabou() ? "INTERVALO" : "1o TEMPO";
-  else              texto = tempoAcabou() ? "FIM DE JOGO" : "2o TEMPO";
+  String texto;
+  unsigned long decorrido = tempoDecorrido();
+  if (periodoEncerrado) {
+    texto = (periodo == 1) ? "INTERVALO" : "FIM DE JOGO";
+  } else if (decorrido > DURACAO_TEMPO) {
+    int extra = (decorrido - DURACAO_TEMPO) / 1000;
+    char acrescimo[8];
+    snprintf(acrescimo, sizeof(acrescimo), "+%d:%02d", extra / 60, extra % 60);
+    texto = String(periodo) + "o T " + acrescimo;
+  } else {
+    texto = String(periodo) + "o TEMPO";
+  }
 
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -382,17 +496,14 @@ void desenharPeriodo() {
 
 void desenharTimer() {
   unsigned long decorrido = tempoDecorrido();
-  if (decorrido >= DURACAO_TEMPO) {        // chegou nos 45: para o relógio
-    pausarTimer();
-    tempoPausado = DURACAO_TEMPO;
-    decorrido = DURACAO_TEMPO;
-  }
-
-  // No 2º tempo o relógio continua de 45:00 até 90:00
-  int segundos = ((periodo - 1) * DURACAO_TEMPO + decorrido) / 1000;
-  if (segundos == ultimoSegundo) return;   // nada mudou, não redesenha
-  ultimoSegundo = segundos;
+  int agora = decorrido / 1000;
+  if (agora == ultimoSegundo) return;      // nada mudou, não redesenha
+  ultimoSegundo = agora;
   desenharPeriodo();
+
+  // O relógio grande para em 45:00 (ou 90:00); o que passar é acréscimo.
+  // No 2º tempo o relógio continua de 45:00 até 90:00
+  int segundos = ((periodo - 1) * DURACAO_TEMPO + min(decorrido, DURACAO_TEMPO)) / 1000;
 
   char texto[6];
   snprintf(texto, sizeof(texto), "%02d:%02d", segundos / 60, segundos % 60);
@@ -436,6 +547,10 @@ void desenharPlacarFutebol(String timeA, String timeB, int placarA, int placarB,
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
   tft.setCursor(230, 110);
   tft.println(placarB);
+
+  atualizarFaltas(0);                      // no futebol a falta nunca fica vermelha
+  desenharBotoesToque("FALTA");
+  desenharTimer();
 }
 
 // Redesenha só os números, sem limpar a tela toda (Futebol)
@@ -505,25 +620,6 @@ void desenharTimerBasquete() {
   tft.setTextPadding(0);
 }
 
-void atualizarFaltasBasquete() {
-  tft.setTextSize(2);
-  tft.setTextDatum(TC_DATUM);
-
-  // Fica vermelho ao atingir 5 faltas coletivas
-  uint16_t corA = (faltasA >= 5) ? TFT_RED : TFT_WHITE;
-  tft.setTextColor(corA, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("FALTAS: 99"));
-  tft.drawString("FALTAS: " + String(faltasA), 80, 180);
-
-  uint16_t corB = (faltasB >= 5) ? TFT_RED : TFT_WHITE;
-  tft.setTextColor(corB, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("FALTAS: 99"));
-  tft.drawString("FALTAS: " + String(faltasB), 240, 180);
-
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextPadding(0);
-}
-
 void atualizarPlacarBasquete() {
   tft.setTextSize(5);
   tft.setTextDatum(TC_DATUM);
@@ -555,7 +651,7 @@ void desenharPlacarBasquete(String timeA, String timeB, int placarA, int placarB
   tft.setTextDatum(TL_DATUM);
 
   atualizarPlacarBasquete();
-  atualizarFaltasBasquete();
+  atualizarFaltas(5);                   // vermelho com 5 faltas coletivas
   desenharBotoesToque("FALTA");
   desenharTimerBasquete();
 }
@@ -654,22 +750,282 @@ void desenharPlacarVolei(String timeA, String timeB, int setAtual){
 
 
 // ============================================================================
-// 8. MÓDULOS FUTUROS (TÊNIS, JIU-JITSU, PADEL) E SELETOR DE PARTIDA
+// 8. MÓDULO: TÊNIS E PADEL (telaAtual = 4 e 6)
 // ============================================================================
-void desenharPlacarTenis(String timeA, String timeB, int setsA, int setsB){
-
+// Games de 0-15-30-40, set até 6 games com 2 de diferença, tie-break no 6-6
+// (até 7 pontos com 2 de diferença), melhor de 3 sets.
+// Padel igual, mas com ponto de ouro: no 40-40 quem fizer o próximo ponto leva.
+// A/B = ponto, C = desfazer o último ponto.
+bool ehPadel() {
+  return telaAtual == 6;
 }
 
-void desenharPlacarJiuJitsu(String lutadorA, String lutadorB, int punicoesA, int punicoesB, int vantagensA, int vantagensB){
-
+bool fimTenis() {
+  return setsA == 2 || setsB == 2;
 }
+
+String textoPontoTenis(int meu, int outro) {
+  if (tiebreak) return String(meu);
+  if (meu >= 3 && outro >= 3) return (meu > outro) ? "AD" : "40";  // iguais / vantagem
+  const char* nomes[] = {"0", "15", "30", "40"};
+  return nomes[meu];
+}
+
+void desenharTopoTenis() {
+  String texto;
+  if (fimTenis())                                          texto = "FIM DE JOGO";
+  else if (tiebreak)                                       texto = "TIE-BREAK";
+  else if (placarA == 3 && placarB == 3 && ehPadel())      texto = "PONTO DE OURO";
+  else if (placarA >= 3 && placarA == placarB)             texto = "IGUAIS";
+  else                                                     texto = String(setsA + setsB + 1) + "o SET";
+
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextPadding(tft.textWidth("PONTO DE OURO"));
+  tft.drawString(texto, 160, 12);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+}
+
+void atualizarTenis() {
+  desenharTopoTenis();
+
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextSize(5);
+  tft.setTextPadding(tft.textWidth("AD"));
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(textoPontoTenis(placarA, placarB), 80, 75);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString(textoPontoTenis(placarB, placarA), 240, 75);
+
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextPadding(tft.textWidth("GAMES: 9"));
+  tft.drawString("GAMES: " + String(gamesA), 80, 130);
+  tft.drawString("GAMES: " + String(gamesB), 240, 130);
+  tft.drawString("SETS: " + String(setsA), 80, 155);
+  tft.drawString("SETS: " + String(setsB), 240, 155);
+
+  tft.setTextPadding(320);                 // sets já jogados, embaixo no meio
+  tft.drawString(historicoSets, 160, 190);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+}
+
+void ganharGameTenis(bool paraA) {
+  if (paraA) gamesA++; else gamesB++;
+  placarA = 0;
+  placarB = 0;
+
+  int meus = paraA ? gamesA : gamesB;
+  int outros = paraA ? gamesB : gamesA;
+  bool ganhouSet = tiebreak || (meus >= 6 && meus - outros >= 2);   // tie-break vale o set (7-6)
+  tiebreak = false;
+
+  if (ganhouSet) {
+    char set[8];
+    snprintf(set, sizeof(set), "%d-%d ", gamesA, gamesB);
+    strlcat(historicoSets, set, sizeof(historicoSets));
+    if (paraA) setsA++; else setsB++;
+    gamesA = 0;
+    gamesB = 0;
+  } else if (gamesA == 6 && gamesB == 6) {
+    tiebreak = true;
+  }
+}
+
+void pontoTenis(bool paraA) {
+  if (fimTenis()) return;
+  salvarEstado();
+  if (paraA) placarA++; else placarB++;
+
+  int meu = paraA ? placarA : placarB;
+  int outro = paraA ? placarB : placarA;
+  bool ganhouGame;
+  if (tiebreak)                                ganhouGame = meu >= 7 && meu - outro >= 2;
+  else if (ehPadel() && meu == 4 && outro == 3) ganhouGame = true;   // ponto de ouro
+  else                                         ganhouGame = meu >= 4 && meu - outro >= 2;
+
+  if (ganhouGame) ganharGameTenis(paraA);
+  atualizarTenis();
+}
+
+void desenharPlacarTenis(String timeA, String timeB){
+  tft.fillScreen(TFT_BLACK);
+
+  // Linha divisória
+  tft.drawLine(160, 40, 160, 175, TFT_DARKGREY);
+
+  // Nomes dos times
+  tft.setTextSize(2);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(timeA, 80, 45);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString(timeB, 240, 45);
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("BOTAO C = DESFAZER", 160, 225);
+  tft.setTextDatum(TL_DATUM);
+
+  atualizarTenis();
+}
+
+
+// ============================================================================
+// 9. MÓDULO: JIU-JITSU (telaAtual = 5)
+// ============================================================================
+// Pontos IBJJF: A/B = +2 (queda, raspagem, joelho na barriga),
+// toque = +3 (passagem de guarda), +4 (montada, costas), V (vantagem), P (punição).
+// Toque fora dos botões = play/pausa. C = desfazer.
+const char* BOTOES_JIU[] = {"+3", "+4", "V", "P"};
+
+bool tempoAcabouJiu() {
+  return tempoDecorrido() >= DURACAO_LUTA;
+}
+
+void desenharTimerJiu() {
+  unsigned long decorrido = tempoDecorrido();
+  if (decorrido >= DURACAO_LUTA) {
+    pausarTimer();
+    tempoPausado = DURACAO_LUTA;
+    decorrido = DURACAO_LUTA;
+  }
+
+  // Cronômetro regressivo (05:00 até 00:00)
+  int segundos = (DURACAO_LUTA - decorrido) / 1000;
+  if (segundos == ultimoSegundo) return;
+  ultimoSegundo = segundos;
+
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextPadding(tft.textWidth("FIM DA LUTA"));
+  tft.drawString(tempoAcabouJiu() ? "FIM DA LUTA" : "LUTA", 160, 35);
+
+  char texto[6];
+  snprintf(texto, sizeof(texto), "%02d:%02d", segundos / 60, segundos % 60);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setTextPadding(tft.textWidth("00:00"));
+  tft.drawString(texto, 160, 5);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+}
+
+void atualizarJiu() {
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextSize(5);
+  tft.setTextPadding(tft.textWidth("99"));
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(String(placarA), 80, 80);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString(String(placarB), 240, 80);
+
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextPadding(tft.textWidth("V:9  P:9"));
+  tft.drawString("V:" + String(vantagensA) + "  P:" + String(punicoesA), 80, 132);
+  tft.drawString("V:" + String(vantagensB) + "  P:" + String(punicoesB), 240, 132);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+}
+
+// Posição do botão de toque i (0 a 3) do lado 0 (A, esquerda) ou 1 (B, direita):
+// 2 linhas x 2 colunas em cada metade da tela
+int botaoJiuX(int lado, int i) { return 8 + lado * 160 + (i % 2) * 74; }
+int botaoJiuY(int i)           { return 165 + (i / 2) * 36; }
+
+void desenharBotoesJiu() {
+  tft.setTextSize(2);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  for (int lado = 0; lado < 2; lado++) {
+    for (int i = 0; i < 4; i++) {
+      int bx = botaoJiuX(lado, i);
+      int by = botaoJiuY(i);
+      tft.drawRoundRect(bx, by, 70, 30, 8, TFT_DARKGREY);
+      tft.drawString(BOTOES_JIU[i], bx + 35, by + 15);
+    }
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+// acao: 0 = +2 (botões A/B), 1 = +3, 2 = +4, 3 = vantagem, 4 = punição
+void pontoJiu(bool paraA, int acao) {
+  salvarEstado();
+  int &pontos = paraA ? placarA : placarB;
+  if (acao == 0) pontos += 2;
+  if (acao == 1) pontos += 3;
+  if (acao == 2) pontos += 4;
+  if (acao == 3) (paraA ? vantagensA : vantagensB)++;
+  if (acao == 4) (paraA ? punicoesA : punicoesB)++;
+  atualizarJiu();
+}
+
+// Retorna true se o toque foi num dos botões +3 / +4 / V / P
+bool tocouBotoesJiu(int x, int y) {
+  for (int lado = 0; lado < 2; lado++) {
+    for (int i = 0; i < 4; i++) {
+      if (tocouEm(x, y, botaoJiuX(lado, i), botaoJiuY(i), 70, 30)) {
+        pontoJiu(lado == 0, i + 1);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void desenharPlacarJiuJitsu(String lutadorA, String lutadorB){
+  tft.fillScreen(TFT_BLACK);
+
+  // Linha divisória
+  tft.drawLine(160, 60, 160, 235, TFT_DARKGREY);
+
+  // Nomes dos lutadores
+  tft.setTextSize(2);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(lutadorA, 80, 58);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString(lutadorB, 240, 58);
+  tft.setTextDatum(TL_DATUM);
+
+  atualizarJiu();
+  desenharBotoesJiu();
+  desenharTimerJiu();
+}
+
+
+// ============================================================================
+// 10. SELETOR DE PARTIDA
+// ============================================================================
 
 // Jogo sem nada a perder: dá para trocar de partida sem apagar um jogo rodando.
-// Menu, relógio pausado (futebol/basquete) ou, no vôlei, set encerrado / 0 x 0.
+// Menu, relógio pausado (futebol/basquete/jiu-jitsu), no vôlei set encerrado / 0 x 0,
+// no tênis/padel entre um game e outro.
 bool jogoParado() {
   if (telaAtual == 0) return true;
   if (telaAtual == 3) return setEncerrado || (placarA == 0 && placarB == 0);
+  if (telaAtual == 4 || telaAtual == 6) return fimTenis() || (placarA == 0 && placarB == 0);
   return !timerRodando;
+}
+
+// Desenha a tela inteira do esporte atual (troca de partida, desfazer, erro na OTA)
+void redesenharTela() {
+  ultimoSegundo = -1;                      // força o relógio a ser redesenhado
+  switch (telaAtual) {
+    case 1: desenharPlacarFutebol(nomeA, nomeB, placarA, placarB, faltasA, faltasB); break;
+    case 2: desenharPlacarBasquete(nomeA, nomeB, placarA, placarB, periodo); break;
+    case 3: desenharPlacarVolei(nomeA, nomeB, periodo); break;
+    case 4:
+    case 6: desenharPlacarTenis(nomeA, nomeB); break;
+    case 5: desenharPlacarJiuJitsu(nomeA, nomeB); break;
+    default: telaInicial(); return;        // menu não tem botão MENU
+  }
+  desenharBotaoMenu();
 }
 
 void aplicarPartida(String modo, String timeA, String timeB){
@@ -683,27 +1039,32 @@ void aplicarPartida(String modo, String timeA, String timeB){
   setsA = 0;
   setsB = 0;
   setEncerrado = false;
+  gamesA = 0;
+  gamesB = 0;
+  tiebreak = false;
+  historicoSets[0] = '\0';
+  vantagensA = 0;
+  vantagensB = 0;
+  punicoesA = 0;
+  punicoesB = 0;
+  nHistorico = 0;
+  periodoEncerrado = false;
   periodo = 1;
   zerarTimer();
 
-  if(modo == "futebol"){
-    telaAtual = 1;
-    desenharPlacarFutebol(nomeA, nomeB, placarA, placarB, 0, 0);
-  } else if(modo == "basquete"){
-    telaAtual = 2;
-    desenharPlacarBasquete(nomeA, nomeB, placarA, placarB, periodo);
-  } else if(modo == "volei"){
-    telaAtual = 3;
-    desenharPlacarVolei(nomeA, nomeB, periodo);
-  } else{ // Colocar outras telas de jogo
-    telaAtual = 0;
-    telaInicial();
-  }
+  if (modo == "futebol")       telaAtual = 1;
+  else if (modo == "basquete") telaAtual = 2;
+  else if (modo == "volei")    telaAtual = 3;
+  else if (modo == "tenis")    telaAtual = 4;
+  else if (modo == "jiujitsu") telaAtual = 5;
+  else if (modo == "padel")    telaAtual = 6;
+  else                         telaAtual = 0;
+  redesenharTela();
 }
 
 
 // ============================================================================
-// 9. SETUP E LOOP PRINCIPAL
+// 11. SETUP E LOOP PRINCIPAL
 // ============================================================================
 void setup() {
   Serial.begin(115200);
@@ -751,36 +1112,22 @@ void loop() {
     int y = map(p.y, 240, 3800, 1, 240);
 
     if (telaAtual == 0) {
-      if (tocouEm(x, y, 5, 80, 105, 40)) {           // Futebol
-        telaAtual = 1;
-        placarA = 0;
-        placarB = 0;
-        periodo = 1;
-        zerarTimer();
-        desenharPlacarFutebol(nomeA, nomeB, placarA, placarB, 0, 0);
-      } else if (tocouEm(x, y, 110, 80, 105, 40)) {  // Basquete
-        telaAtual = 2;
-        placarA = 0;
-        placarB = 0;
-        faltasA = 0;
-        faltasB = 0;
-        periodo = 1;
-        zerarTimer();
-        desenharPlacarBasquete(nomeA, nomeB, placarA, placarB, periodo);
-      } else if (tocouEm(x, y, 215, 80, 105, 40)) {  // Vôlei
-        telaAtual = 3;
-        placarA = 0;
-        placarB = 0;
-        setsA = 0;
-        setsB = 0;
-        periodo = 1;
-        setEncerrado = false;
-        desenharPlacarVolei(nomeA, nomeB, periodo);
+      // 6 botões do menu, na mesma ordem do desenho: 3 em cima, 3 embaixo
+      const char* modos[] = {"futebol", "basquete", "volei", "tenis", "jiujitsu", "padel"};
+      for (int i = 0; i < 6; i++) {
+        int bx = 5 + (i % 3) * 105;
+        int by = (i < 3) ? 80 : 140;
+        if (tocouEm(x, y, bx, by, 105, 40)) aplicarPartida(modos[i], nomeA, nomeB);
       }
-    } else if (telaAtual == 1) {                     // Futebol: toque = play/pausa
-      if (tempoAcabou()) {
+    } else if (tocouMenu(x, y)) {                    // botão MENU (todas as telas de jogo)
+      voltarMenu();
+    } else if (telaAtual == 1) {                     // Futebol: botões FALTA ou play/pausa
+      if (tocouBotoesToque(x, y)) {
+        // falta: tratada em CONTROLES: FUTEBOL
+      } else if (periodoEncerrado) {
         if (periodo == 1) {                          // no intervalo: toque prepara o 2º tempo
           periodo = 2;
+          periodoEncerrado = false;
           zerarTimer();
         }
       } else if (timerRodando) pausarTimer();
@@ -792,6 +1139,11 @@ void loop() {
       }
     } else if (telaAtual == 3) {                     // Vôlei: botões -1
       tocouBotoesToque(x, y);
+    } else if (telaAtual == 5) {                     // Jiu-Jitsu: +3/+4/V/P ou play/pausa
+      if (!tocouBotoesJiu(x, y) && !tempoAcabouJiu()) {
+        if (timerRodando) pausarTimer();
+        else iniciarTimer();
+      }
     }
 
     while (ts.touched()) delay(10);   // espera tirar o dedo
@@ -808,6 +1160,20 @@ void loop() {
     if (apertou(BOTAO_B)) {
       placarB++;
       atualizarPlacar();
+    }
+    // BOTAO_C: encerra o tempo (fim do 1º = intervalo, fim do 2º = fim de jogo)
+    if (apertou(BOTAO_C) && !periodoEncerrado && tempoDecorrido() > 0) {
+      pausarTimer();
+      periodoEncerrado = true;
+      ultimoSegundo = -1;                  // redesenha "INTERVALO" / "FIM DE JOGO"
+    }
+    if (apertou(BOTAO_D)) {
+      faltasA++;
+      atualizarFaltas(0);
+    }
+    if (apertou(BOTAO_E)) {
+      faltasB++;
+      atualizarFaltas(0);
     }
   }
 
@@ -828,16 +1194,16 @@ void loop() {
       faltasB = 0;
       periodo++;
       zerarTimer();
-      atualizarFaltasBasquete();
+      atualizarFaltas(5);
       desenharTimerBasquete();
     }
     if (apertou(BOTAO_D)) {
       faltasA++;
-      atualizarFaltasBasquete();
+      atualizarFaltas(5);
     }
     if (apertou(BOTAO_E)) {
       faltasB++;
-      atualizarFaltasBasquete();
+      atualizarFaltas(5);
     }
   }
 
@@ -888,5 +1254,20 @@ void loop() {
       placarB--;
       atualizarPontosVolei();
     }
+  }
+
+  // --- CONTROLES: TÊNIS E PADEL (telaAtual == 4 / 6) ---
+  if (telaAtual == 4 || telaAtual == 6) {
+    if (apertou(BOTAO_A)) pontoTenis(true);
+    if (apertou(BOTAO_B)) pontoTenis(false);
+    if (apertou(BOTAO_C)) desfazer();
+  }
+
+  // --- CONTROLES: JIU-JITSU (telaAtual == 5) ---
+  if (telaAtual == 5) {
+    desenharTimerJiu();
+    if (apertou(BOTAO_A)) pontoJiu(true, 0);     // +2
+    if (apertou(BOTAO_B)) pontoJiu(false, 0);
+    if (apertou(BOTAO_C)) desfazer();
   }
 }
