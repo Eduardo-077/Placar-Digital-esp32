@@ -1,6 +1,9 @@
 # Senhas do Wi-Fi e chaves do ESP
 placar_CYD/segredos.h
 
+# Senhas do servidor (InfluxDB, Grafana)
+servidor/.env
+
 # Binários gerados pelo "Export Compiled Binary" (usados na OTA)
 build/
 *.bin

@@ -1,0 +1,68 @@
+# Servidor do placar: InfluxDB + Grafana + Node-RED
+#
+# Uso (no servidor, dentro desta pasta). Funciona igual no Linux e no
+# Windows com Docker Desktop:
+#   copie .env.exemplo para .env e preencha as senhas
+#   docker compose up -d      sobe tudo (e volta sozinho quando o Docker reinicia)
+#   docker compose ps         mostra o que está rodando
+#   docker compose logs -f    mostra os logs (Ctrl+C para sair)
+#
+# Endereços (IP_DO_SERVIDOR: "ip a" no Linux, "ipconfig" no Windows):
+#   InfluxDB  http://IP_DO_SERVIDOR:8086
+#   Grafana   http://IP_DO_SERVIDOR:3000
+#   Node-RED  http://IP_DO_SERVIDOR:1880
+#
+# Os dados ficam nos volumes do Docker: "docker compose down" NÃO apaga nada.
+# Só "docker compose down -v" apaga (cuidado).
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-dados:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    environment:
+      # Só vale na PRIMEIRA vez que sobe: cria usuário, organização e bucket
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USUARIO}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_SENHA}
+      DOCKER_INFLUXDB_INIT_ORG: placar
+      DOCKER_INFLUXDB_INIT_BUCKET: placar
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-dados:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USUARIO}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_SENHA}
+    depends_on:
+      - influxdb
+
+  nodered:
+    image: nodered/node-red:4.0
+    restart: unless-stopped
+    ports:
+      - "1880:1880"
+    volumes:
+      - nodered-dados:/data
+    environment:
+      TZ: America/Sao_Paulo
+    depends_on:
+      - influxdb
+    # ATENÇÃO: o editor do Node-RED vem SEM senha. Tudo bem na rede de casa,
+    # mas configure o adminAuth (settings.js) antes de abrir para fora.
+    # Dentro do Node-RED, o InfluxDB é http://influxdb:8086 (nome do serviço).
+
+volumes:
+  influxdb-dados:
+  influxdb-config:
+  grafana-dados:
+  nodered-dados:

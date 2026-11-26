@@ -1,0 +1,240 @@
+ROTEIRO - SERVIDOR DO PLACAR NUM PC WINDOWS (DOCKER DESKTOP)
+Atualizado em 26/11/2026
+================================================================
+Sobe InfluxDB + Grafana + Node-RED num PC com Windows 10/11, usando o
+docker-compose.yml desta pasta. É a Fase 3 do roteiro_ferramentas.txt.
+
+Resultado no fim:
+  InfluxDB  http://IP_DO_PC:8086   (banco de dados temporal)
+  Grafana   http://IP_DO_PC:3000   (dashboards)
+  Node-RED  http://IP_DO_PC:1880   (busca os dados no Supabase)
+E tudo volta sozinho quando o PC é ligado.
+
+
+----------------------------------------------------------------
+PASSO 0 - CONFERIR O PC
+----------------------------------------------------------------
+- Windows 10 (versão 22H2) ou Windows 11, 64 bits.
+- Pelo menos 8 GB de RAM no PC (os serviços usam ~2 GB).
+- 20 GB livres no disco.
+- Conectado no roteador por cabo, de preferência (Wi-Fi também funciona).
+- Virtualização ligada:
+    Ctrl+Shift+Esc (Gerenciador de Tarefas) -> Desempenho -> CPU
+    -> procure "Virtualização: Habilitado".
+    Se estiver "Desabilitado": reiniciar, entrar na BIOS (Del, F2 ou F10
+    no boot) e ativar "Intel Virtualization Technology (VT-x)" ou
+    "SVM Mode" (AMD). Salvar e reiniciar.
+
+
+----------------------------------------------------------------
+PASSO 1 - INSTALAR O GIT
+----------------------------------------------------------------
+1. Baixar em git-scm.com/download/win e instalar com as opções padrão.
+2. Conferir no PowerShell:
+     git --version
+
+
+----------------------------------------------------------------
+PASSO 2 - INSTALAR O DOCKER DESKTOP
+----------------------------------------------------------------
+1. Baixar em docker.com/products/docker-desktop (Windows - AMD64).
+2. Na instalação, deixar marcado "Use WSL 2 instead of Hyper-V".
+3. Reiniciar o PC quando pedir.
+4. Abrir o Docker Desktop, aceitar os termos e pular o login
+   ("Continue without signing in" / "Skip").
+   Se aparecer erro de WSL, rodar no PowerShell como administrador:
+     wsl --install
+     wsl --update
+   e reiniciar de novo.
+5. Conferir no PowerShell (com o Docker Desktop aberto):
+     docker --version
+     docker run hello-world
+   O segundo comando deve escrever "Hello from Docker!".
+
+
+----------------------------------------------------------------
+PASSO 3 - CONFIGURAR O DOCKER DESKTOP PARA LIGAR SOZINHO
+----------------------------------------------------------------
+No Docker Desktop: ícone de engrenagem (Settings) -> General:
+  [x] Start Docker Desktop when you sign in to your computer
+Clicar em "Apply & restart".
+
+Opcional, se o PC tiver pouca RAM (8 GB): limitar a memória do Docker.
+Criar o arquivo  C:\Users\SEU_USUARIO\.wslconfig  com:
+  [wsl2]
+  memory=3GB
+Depois rodar  wsl --shutdown  e abrir o Docker Desktop de novo.
+
+
+----------------------------------------------------------------
+PASSO 4 - BAIXAR O PROJETO
+----------------------------------------------------------------
+(Antes, alguém do grupo precisa ter feito commit e push da pasta servidor/.)
+
+No PowerShell:
+  cd $HOME
+  git clone https://github.com/Eduardo-077/Placar-Digital-esp32.git
+  cd Placar-Digital-esp32\servidor
+
+Para atualizar depois (quando o docker-compose.yml mudar):
+  git pull
+
+
+----------------------------------------------------------------
+PASSO 5 - CRIAR O .env (SENHAS)
+----------------------------------------------------------------
+1. No Explorer, ativar: Exibir -> Mostrar -> Extensões de nomes de
+   arquivos. (Senão o arquivo vira ".env.txt" e o Docker não acha.)
+2. Na pasta servidor: copiar o ".env.exemplo" e renomear a cópia para
+   ".env". Ou no PowerShell:
+     Copy-Item .env.exemplo .env
+3. Gerar o token do InfluxDB no PowerShell:
+     -join ((1..32) | % { '{0:x2}' -f (Get-Random -Max 256) })
+   Copiar o resultado (64 letras/números).
+4. Abrir o .env no Bloco de Notas:
+     notepad .env
+   e trocar:
+     INFLUX_SENHA    -> uma senha com 8+ caracteres
+     INFLUX_TOKEN    -> o token do item 3
+     GRAFANA_SENHA   -> outra senha
+   Salvar.
+5. Guardar essas senhas num lugar seguro (gerenciador de senhas).
+   O .env está no .gitignore: NUNCA vai para o GitHub.
+
+
+----------------------------------------------------------------
+PASSO 6 - SUBIR OS SERVIÇOS
+----------------------------------------------------------------
+No PowerShell, dentro da pasta servidor:
+  docker compose up -d
+
+Na primeira vez ele baixa as imagens (~1 GB, alguns minutos).
+Conferir:
+  docker compose ps
+Os 3 (influxdb, grafana, nodered) devem aparecer como "running" / "Up".
+
+
+----------------------------------------------------------------
+PASSO 7 - TESTAR NO PRÓPRIO PC
+----------------------------------------------------------------
+No navegador do PC servidor:
+  http://localhost:8086  -> InfluxDB: entrar com INFLUX_USUARIO/INFLUX_SENHA.
+                            Deve existir o bucket "placar"
+                            (menu Load Data -> Buckets).
+  http://localhost:3000  -> Grafana: entrar com GRAFANA_USUARIO/GRAFANA_SENHA.
+  http://localhost:1880  -> Node-RED: abre o editor direto (sem senha).
+
+
+----------------------------------------------------------------
+PASSO 8 - LIBERAR O ACESSO PELA REDE
+----------------------------------------------------------------
+1. Descobrir o IP do PC. No PowerShell:
+     ipconfig
+   Anotar o "Endereço IPv4" do adaptador em uso (ex.: 192.168.0.50).
+2. Rede como PRIVADA (na Pública o Windows bloqueia tudo):
+   Configurações -> Rede e Internet -> (Ethernet ou Wi-Fi) -> clicar na
+   rede -> Tipo de perfil de rede: Privada.
+3. Liberar as portas no Firewall. PowerShell como ADMINISTRADOR:
+     New-NetFirewallRule -DisplayName "Placar servidor" -Direction Inbound -Protocol TCP -LocalPort 3000,1880,8086 -Action Allow -Profile Private
+4. Testar de OUTRO computador ou do celular, na mesma rede:
+     http://IP_DO_PC:3000
+
+
+----------------------------------------------------------------
+PASSO 9 - DEIXAR O PC SEMPRE PRONTO
+----------------------------------------------------------------
+1. Não suspender:
+   Configurações -> Sistema -> Energia -> Tela e suspensão:
+   "Suspender o dispositivo após": Nunca (na tomada).
+   (A tela pode desligar, não tem problema.)
+2. IP fixo: no painel do roteador (geralmente http://192.168.0.1 ou
+   192.168.1.1), procurar "DHCP" -> "Reserva de endereço" / "DHCP
+   reservation" e reservar o IP do passo 8 para este PC.
+   Assim o endereço do servidor nunca muda.
+3. Login automático (o Docker só abre depois do login no Windows):
+   Win+R -> netplwiz -> desmarcar "Os usuários devem digitar um nome de
+   usuário e uma senha" -> OK -> digitar a senha do Windows.
+   Só fazer isso se o PC fica num lugar seguro.
+   (No Windows 11, se a opção não aparecer: Configurações -> Contas ->
+   Opções de entrada -> desativar "Para maior segurança, permitir apenas
+   entrada do Windows Hello..." e abrir o netplwiz de novo.)
+4. Windows Update: Configurações -> Windows Update -> Opções avançadas
+   -> Horário ativo: deixar o horário de uso/apresentação protegido.
+
+
+----------------------------------------------------------------
+PASSO 10 - TESTE DE REINÍCIO (FAZER UMA VEZ)
+----------------------------------------------------------------
+1. Reiniciar o PC e não mexer em nada.
+2. Esperar ~2 minutos depois de entrar no Windows.
+3. De outro computador, abrir http://IP_DO_PC:3000.
+   Se abriu: o servidor volta sozinho. Pronto.
+   Se não abriu: conferir o passo 3 (Docker ao iniciar) e o passo 9.3.
+
+
+----------------------------------------------------------------
+PASSO 11 - ZEROTIER (ACESSO DE FORA DE CASA)
+----------------------------------------------------------------
+Para o grupo acessar o servidor de qualquer lugar.
+1. Criar conta em my.zerotier.com -> "Create A Network".
+   Anotar o Network ID (16 caracteres).
+2. No PC servidor e no notebook de cada integrante: instalar o ZeroTier
+   (zerotier.com/download -> Windows), clicar no ícone perto do relógio
+   -> "Join New Network..." -> colar o Network ID.
+   Se o Windows perguntar se a rede pode ser descoberta: SIM (fica Privada).
+3. Em my.zerotier.com -> a rede -> Members: marcar "Auth" de cada
+   máquina. Anotar o "Managed IP" do PC servidor (ex.: 10.147.20.5).
+4. Liberar o firewall também na rede do ZeroTier: no passo 8.2, deixar a
+   rede "ZeroTier One" como Privada.
+5. De qualquer lugar com o ZeroTier ligado:
+     http://IP_ZEROTIER_DO_SERVIDOR:3000
+OBS: o ESP32 NÃO entra no ZeroTier. Ele continua falando só com o
+Supabase; quem busca os dados lá é o Node-RED.
+
+
+----------------------------------------------------------------
+COMANDOS ÚTEIS (PowerShell, na pasta servidor)
+----------------------------------------------------------------
+  docker compose ps              o que está rodando
+  docker compose logs -f grafana logs de um serviço (Ctrl+C sai)
+  docker compose restart nodered reinicia um serviço
+  docker compose stop            para tudo (dados ficam)
+  docker compose up -d           sobe de novo / aplica mudanças
+  git pull ; docker compose up -d   atualiza o projeto e aplica
+
+  NUNCA rodar "docker compose down -v": o -v APAGA todos os dados.
+
+
+----------------------------------------------------------------
+PROBLEMAS COMUNS
+----------------------------------------------------------------
+  "docker: command not found" / erro de conexão com o Docker
+      -> o Docker Desktop não está aberto. Abrir e esperar ficar verde.
+
+  "WSL 2 installation is incomplete" / erro de virtualização
+      -> passo 0 (BIOS) e "wsl --update" como administrador.
+
+  Abre em localhost mas não de outro computador
+      -> passo 8: rede Privada e regra do firewall.
+
+  InfluxDB pede configuração inicial (tela "Get Started")
+      -> o .env não foi lido. Conferir se o nome é ".env" (não ".env.txt")
+         e se está na mesma pasta do docker-compose.yml. Depois:
+           docker compose down
+           docker volume rm servidor_influxdb-dados servidor_influxdb-config
+           docker compose up -d
+         (só fazer isso no início, quando ainda não tem dados)
+
+  Porta já em uso ("port is already allocated")
+      -> outro programa usa a 3000/1880/8086. Fechar o programa ou trocar
+         o número da esquerda no docker-compose.yml (ex.: "3001:3000").
+
+  Esqueci a senha do Grafana
+      -> docker compose exec grafana grafana cli admin reset-admin-password NOVA_SENHA
+
+
+----------------------------------------------------------------
+PRÓXIMO PASSO
+----------------------------------------------------------------
+Com os 3 endereços abrindo de outro computador: Fase 4 do
+roteiro_ferramentas.txt (o ESP envia os eventos do jogo para o Supabase).
