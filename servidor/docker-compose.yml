@@ -55,6 +55,10 @@ services:
       - nodered-dados:/data
     environment:
       TZ: America/Sao_Paulo
+      # Lidos pelos nós "function" do fluxo (env.get), assim o flows.json
+      # não leva nenhuma chave para o GitHub
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_KEY: ${SUPABASE_KEY}
     depends_on:
       - influxdb
     # ATENÇÃO: o editor do Node-RED vem SEM senha. Tudo bem na rede de casa,

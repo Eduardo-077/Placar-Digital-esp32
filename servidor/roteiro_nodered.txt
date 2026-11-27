@@ -1,0 +1,118 @@
+ROTEIRO - NODE-RED (SUPABASE -> INFLUXDB)
+Atualizado em 27/11/2026
+================================================================
+Fases 5 e 6 do roteiro_ferramentas.txt. Pré-requisitos:
+- Servidor rodando (roteiro_servidor_windows.txt).
+- supabase/etapa3_eventos.sql rodado e o ESP já gravando eventos.
+
+O fluxo pronto está em servidor/nodered/flows.json:
+  [a cada 5 s]  -> busca eventos novos no Supabase  -> InfluxDB (measurement "evento")
+  [a cada 30 s] -> busca a última telemetria         -> InfluxDB (measurement "telemetria")
+As chaves do Supabase NÃO ficam no fluxo: vêm do .env (SUPABASE_URL/SUPABASE_KEY).
+
+
+----------------------------------------------------------------
+PASSO 1 - ATUALIZAR O SERVIDOR
+----------------------------------------------------------------
+No PC servidor, PowerShell na pasta servidor:
+  git pull
+  notepad .env
+Acrescentar no fim (mesmos valores do segredos.h do ESP; chave ANON):
+  SUPABASE_URL=https://SEU_PROJETO.supabase.co
+  SUPABASE_KEY=sua_chave_anon_aqui
+Salvar e aplicar (recria só o Node-RED, os dados ficam):
+  docker compose up -d
+Conferir se a variável chegou:
+  docker compose exec nodered printenv SUPABASE_URL
+
+
+----------------------------------------------------------------
+PASSO 2 - TOKEN DE ESCRITA NO INFLUXDB
+----------------------------------------------------------------
+Um token que só escreve no bucket "placar" (se vazar, não apaga nada).
+1. http://IP_DO_SERVIDOR:8086 -> entrar com INFLUX_USUARIO/INFLUX_SENHA.
+2. Menu da esquerda: Load Data (seta para cima) -> API Tokens
+   -> Generate API Token -> Custom API Token.
+3. Buckets -> placar: marcar só "Write". Descrição: "nodered escrita".
+4. Generate -> COPIAR O TOKEN AGORA (ele não aparece de novo).
+   Guardar junto das outras senhas.
+
+
+----------------------------------------------------------------
+PASSO 3 - INSTALAR O NÓ DO INFLUXDB NO NODE-RED
+----------------------------------------------------------------
+1. http://IP_DO_SERVIDOR:1880
+2. Menu (3 tracinhos, canto superior direito) -> Manage palette
+   -> aba Install -> procurar: node-red-contrib-influxdb -> Install.
+3. Esperar aparecer "Nodes added to palette".
+
+
+----------------------------------------------------------------
+PASSO 4 - IMPORTAR O FLUXO
+----------------------------------------------------------------
+1. Abrir o arquivo servidor/nodered/flows.json (Bloco de Notas),
+   Ctrl+A, Ctrl+C.
+2. Node-RED: Menu -> Import -> colar -> Import.
+   Aparece a aba "Placar".
+3. Dar dois cliques num dos nós "InfluxDB placar" -> no campo "Server"
+   clicar no lápis (InfluxDB (docker)):
+     Version: 2.0
+     URL:     http://influxdb:8086     (nome do serviço, não o IP)
+     Token:   o token do passo 2
+   Update -> Done.
+   (O token não vai no flows.json: o Node-RED guarda separado.)
+4. Clicar em Deploy (botão vermelho, canto superior direito).
+
+
+----------------------------------------------------------------
+PASSO 5 - CONFERIR
+----------------------------------------------------------------
+No Node-RED, embaixo dos nós "converte":
+  verde "último id 67"       -> eventos copiados
+  verde "recebida 17:01:02"  -> telemetria copiada
+  vermelho "erro 401"        -> SUPABASE_KEY errada (passo 1)
+  vermelho "erro undefined"  -> SUPABASE_URL vazia (passo 1)
+Erros do InfluxDB (token errado, bucket) aparecem na aba Debug
+(ícone de inseto, à direita). Para ver os pontos montados: ativar o nó
+"ver pontos" (clicar no quadradinho dele).
+
+No InfluxDB: Data Explorer -> bucket placar -> _measurement evento
+-> _field placar_a -> Submit. Deve aparecer o gráfico dos pontos.
+
+Teste ao vivo: marcar um ponto no placar; em até ~8 s o "último id"
+sobe.
+
+
+----------------------------------------------------------------
+COMO OS DADOS FICAM NO INFLUXDB (para o Grafana)
+----------------------------------------------------------------
+measurement "evento"
+  tags:   placar_id, partida_id, modo, tipo, equipe ('A', 'B' ou '-')
+  fields: placar_a, placar_b, sets_a, sets_b, periodo, tempo_jogo_s,
+          time_a, time_b (nomes dos times)
+  horário: o created_at do Supabase
+  ("time" é reservado no InfluxDB, por isso a coluna time vira a tag equipe)
+
+measurement "telemetria"
+  tags:   placar_id
+  fields: rssi, heap_livre, uptime_s
+  Uso: placar OFFLINE se o último ponto tiver mais de 3 min.
+
+
+----------------------------------------------------------------
+SE MUDAR O FLUXO NO EDITOR
+----------------------------------------------------------------
+Menu -> Export -> aba "Current flow" -> JSON formatado -> Copy,
+colar por cima do servidor/nodered/flows.json e fazer commit.
+O token do InfluxDB não vai junto (o export não leva credenciais).
+
+Depois de reiniciar o Node-RED ele copia todos os eventos de novo
+desde o id 0. Não duplica: o InfluxDB sobrescreve pontos com o mesmo
+horário e as mesmas tags.
+
+
+----------------------------------------------------------------
+PRÓXIMO PASSO
+----------------------------------------------------------------
+Fase 7: dashboard do Grafana (placar atual, evolução da partida,
+linha do tempo dos eventos, online/offline).

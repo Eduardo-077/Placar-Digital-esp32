@@ -19,3 +19,8 @@
 // Login da página de atualização (http://IP_DO_PLACAR/update)
 #define OTA_USUARIO  "admin"
 #define OTA_SENHA    "troque_esta_senha"
+
+// Token do placar, para gravar eventos e telemetria no Supabase.
+// Depois de rodar o supabase/etapa3_eventos.sql, pegar no SQL Editor:
+//   select placar_id, token from public.segredos;
+#define PLACAR_TOKEN  "cole_o_token_aqui"

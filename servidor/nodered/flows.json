@@ -1,0 +1,262 @@
+[
+  {
+    "id": "aba_placar",
+    "type": "tab",
+    "label": "Placar",
+    "disabled": false,
+    "info": "Copia eventos e telemetria do Supabase para o InfluxDB.\nVer servidor/roteiro_nodered.txt"
+  },
+  {
+    "id": "c1",
+    "type": "comment",
+    "z": "aba_placar",
+    "name": "Eventos do jogo: Supabase -> InfluxDB (a cada 5 s)",
+    "info": "",
+    "x": 230,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "i1",
+    "type": "inject",
+    "z": "aba_placar",
+    "name": "a cada 5 s",
+    "props": [],
+    "repeat": "5",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "3",
+    "topic": "",
+    "x": 130,
+    "y": 100,
+    "wires": [
+      [
+        "f1"
+      ]
+    ]
+  },
+  {
+    "id": "f1",
+    "type": "function",
+    "z": "aba_placar",
+    "name": "monta URL eventos",
+    "func": "// Pede ao Supabase só os eventos depois do último já copiado.\n// select=*,partidas(...) traz junto os nomes dos times (chave estrangeira).\n// Depois de reiniciar o Node-RED o contador volta a 0 e copia tudo de novo:\n// não duplica, o InfluxDB sobrescreve pontos com o mesmo horário e tags.\nconst ultimo = flow.get('ultimoEvento') || 0;\nmsg.url = env.get('SUPABASE_URL') + '/rest/v1/eventos'\n        + '?select=*,partidas(time_a,time_b)'\n        + '&id=gt.' + ultimo + '&order=id.asc&limit=500';\nmsg.headers = {\n    apikey: env.get('SUPABASE_KEY'),\n    Authorization: 'Bearer ' + env.get('SUPABASE_KEY')\n};\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 320,
+    "y": 100,
+    "wires": [
+      [
+        "h1"
+      ]
+    ]
+  },
+  {
+    "id": "h1",
+    "type": "http request",
+    "z": "aba_placar",
+    "name": "GET Supabase",
+    "method": "GET",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 510,
+    "y": 100,
+    "wires": [
+      [
+        "f2"
+      ]
+    ]
+  },
+  {
+    "id": "f2",
+    "type": "function",
+    "z": "aba_placar",
+    "name": "converte eventos",
+    "func": "// Cada linha da tabela eventos vira um ponto do InfluxDB (measurement \"evento\").\n// tags   = o que se usa para filtrar/agrupar (texto curto, poucos valores)\n// fields = os números do jogo e os nomes dos times\n// Obs.: \"time\" é palavra reservada no InfluxDB, por isso a tag se chama \"equipe\".\nif (msg.statusCode !== 200 || !Array.isArray(msg.payload)) {\n    node.status({ fill: 'red', shape: 'ring', text: 'erro ' + msg.statusCode });\n    node.warn(msg.payload);\n    return null;\n}\nif (msg.payload.length === 0) return null;\nflow.set('ultimoEvento', msg.payload[msg.payload.length - 1].id);\n\nmsg.payload = msg.payload.map(e => ({\n    measurement: 'evento',\n    tags: {\n        placar_id: e.placar_id,\n        partida_id: String(e.partida_id ?? 0),\n        modo: e.modo,\n        tipo: e.tipo,\n        equipe: e.time ?? '-'\n    },\n    fields: {\n        placar_a: e.placar_a,\n        placar_b: e.placar_b,\n        sets_a: e.sets_a,\n        sets_b: e.sets_b,\n        periodo: e.periodo,\n        tempo_jogo_s: e.tempo_jogo_s,\n        time_a: e.partidas?.time_a ?? 'A',\n        time_b: e.partidas?.time_b ?? 'B'\n    },\n    timestamp: new Date(e.created_at)\n}));\n\nnode.status({ fill: 'green', shape: 'dot', text: 'último id ' + flow.get('ultimoEvento') });\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 700,
+    "y": 100,
+    "wires": [
+      [
+        "b1",
+        "d1"
+      ]
+    ]
+  },
+  {
+    "id": "b1",
+    "type": "influxdb batch",
+    "z": "aba_placar",
+    "influxdb": "cfg_influx",
+    "precision": "",
+    "retentionPolicy": "",
+    "name": "InfluxDB placar",
+    "database": "database",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "placar",
+    "bucket": "placar",
+    "x": 910,
+    "y": 80,
+    "wires": []
+  },
+  {
+    "id": "d1",
+    "type": "debug",
+    "z": "aba_placar",
+    "name": "ver pontos",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 890,
+    "y": 140,
+    "wires": []
+  },
+  {
+    "id": "c2",
+    "type": "comment",
+    "z": "aba_placar",
+    "name": "Telemetria (só para online/offline, a cada 30 s)",
+    "info": "",
+    "x": 220,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "i2",
+    "type": "inject",
+    "z": "aba_placar",
+    "name": "a cada 30 s",
+    "props": [],
+    "repeat": "30",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "3",
+    "topic": "",
+    "x": 130,
+    "y": 280,
+    "wires": [
+      [
+        "f3"
+      ]
+    ]
+  },
+  {
+    "id": "f3",
+    "type": "function",
+    "z": "aba_placar",
+    "name": "monta URL telemetria",
+    "func": "// Só a última telemetria: serve para saber se o placar está online\n// (o ESP manda uma a cada ~60 s; o Grafana mostra OFFLINE se passar de 3 min).\nmsg.url = env.get('SUPABASE_URL') + '/rest/v1/telemetria?order=id.desc&limit=1';\nmsg.headers = {\n    apikey: env.get('SUPABASE_KEY'),\n    Authorization: 'Bearer ' + env.get('SUPABASE_KEY')\n};\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 330,
+    "y": 280,
+    "wires": [
+      [
+        "h2"
+      ]
+    ]
+  },
+  {
+    "id": "h2",
+    "type": "http request",
+    "z": "aba_placar",
+    "name": "GET Supabase",
+    "method": "GET",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 530,
+    "y": 280,
+    "wires": [
+      [
+        "f4"
+      ]
+    ]
+  },
+  {
+    "id": "f4",
+    "type": "function",
+    "z": "aba_placar",
+    "name": "converte telemetria",
+    "func": "if (msg.statusCode !== 200 || !Array.isArray(msg.payload)) {\n    node.status({ fill: 'red', shape: 'ring', text: 'erro ' + msg.statusCode });\n    node.warn(msg.payload);\n    return null;\n}\nif (msg.payload.length === 0) return null;\n\nconst t = msg.payload[0];\nif (t.id === flow.get('ultimaTelemetria')) return null;   // nada novo\nflow.set('ultimaTelemetria', t.id);\n\nmsg.payload = [{\n    measurement: 'telemetria',\n    tags: { placar_id: t.placar_id },\n    fields: { rssi: t.rssi, heap_livre: t.heap_livre, uptime_s: t.uptime_s },\n    timestamp: new Date(t.created_at)\n}];\nnode.status({ fill: 'green', shape: 'dot', text: 'recebida ' + new Date(t.created_at).toLocaleTimeString('pt-BR') });\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 730,
+    "y": 280,
+    "wires": [
+      [
+        "b2"
+      ]
+    ]
+  },
+  {
+    "id": "b2",
+    "type": "influxdb batch",
+    "z": "aba_placar",
+    "influxdb": "cfg_influx",
+    "precision": "",
+    "retentionPolicy": "",
+    "name": "InfluxDB placar",
+    "database": "database",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "placar",
+    "bucket": "placar",
+    "x": 940,
+    "y": 280,
+    "wires": []
+  },
+  {
+    "id": "cfg_influx",
+    "type": "influxdb",
+    "hostname": "influxdb",
+    "port": "8086",
+    "protocol": "http",
+    "database": "database",
+    "name": "InfluxDB (docker)",
+    "usetls": false,
+    "tls": "",
+    "influxdbVersion": "2.0",
+    "url": "http://influxdb:8086",
+    "timeout": "10",
+    "rejectUnauthorized": true
+  }
+]

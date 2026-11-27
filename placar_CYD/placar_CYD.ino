@@ -18,6 +18,9 @@
 #if !defined(OTA_USUARIO) || !defined(OTA_SENHA)
 #error "Adicione OTA_USUARIO e OTA_SENHA no segredos.h (veja o segredos_exemplo.h)"
 #endif
+#ifndef PLACAR_TOKEN
+#error "Adicione PLACAR_TOKEN no segredos.h (veja o segredos_exemplo.h)"
+#endif
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -30,6 +33,7 @@ TFT_eSPI tft = TFT_eSPI();
 #define BOTAO_A 22  // +1 Ponto Time A (Todos os esportes)
 #define BOTAO_B 27  // +1 Ponto Time B (Todos os esportes)
 #define BOTAO_C 35  // Encerrar tempo / quarto / set, ou desfazer (depende do esporte)
+#define SENSOR_LUZ 34 // LDR da própria CYD (telemetria)
 
 // O IO35 NÃO tem pull-up interno: sem o resistor de 10k (IO35 -> 3.3V) o pino
 // fica "flutuando", lê LOW sozinho e o apertou() trava esperando soltar.
@@ -108,6 +112,7 @@ void redesenharTela();
 // tela e nas variáveis do jogo. A tarefa de rede só deixa a partida nova
 // nesta fila ("caixa de correio"), e o loop() decide quando aplicar.
 struct Partida {
+  long id;                        // id na tabela partidas (vai junto nos eventos)
   bool primeira;                  // leitura ao ligar: só guarda os nomes
   bool substituir;                // true = aplica mesmo com jogo rodando
   char modo[12];
@@ -117,6 +122,24 @@ struct Partida {
 QueueHandle_t filaPartidas;       // tamanho 1: sempre guarda só a mais recente
 long ultimoId = -1;               // id da última partida lida (só a tarefa de rede usa)
 volatile bool atualizandoOTA = false; // durante a OTA a tarefa de rede fica quieta
+
+// Eventos do jogo (gol, ponto, falta...): o loop() deixa na fila e a tarefa
+// de rede envia para o Supabase. Sem internet eles esperam na fila e saem
+// quando a rede voltar. Se a fila encher, os eventos novos se perdem.
+struct Evento {
+  long partidaId;                 // 0 = sem partida do banco
+  char modo[12];
+  char tipo[12];                  // ver o check da tabela eventos (etapa3_eventos.sql)
+  char time;                      // 'A', 'B' ou 0 (nenhum)
+  int placarA, placarB, setsA, setsB, periodo;
+  int tempoJogoS;
+};
+const int TAMANHO_FILA_EVENTOS = 60;
+QueueHandle_t filaEventos;
+long partidaAtualId = 0;          // id da partida na tela (só o loop() usa)
+
+const unsigned long INTERVALO_TELEMETRIA = 60000;   // 60 s
+unsigned long ultimaTelemetria = 0;                 // só a tarefa de rede usa
 
 void conectarWiFi(){
   Serial.println("Conectando no wifi");
@@ -169,6 +192,7 @@ void buscarPartida() {
 
       if (id != ultimoId) {
         Partida nova;
+        nova.id = id;
         nova.primeira = (ultimoId == -1);   // ao ligar: não pula direto para o jogo
         nova.substituir = p["substituir"] | false;
         strlcpy(nova.modo,  p["modo"]   | "", sizeof(nova.modo));
@@ -183,6 +207,100 @@ void buscarPartida() {
     }
   }
   http.end();
+}
+
+// Chama uma função do Supabase (/rest/v1/rpc/...) com o corpo em JSON.
+// Retorna o código HTTP (negativo = sem conexão / tempo esgotado).
+int chamarFuncao(const char* funcao, JsonDocument &corpo) {
+  WiFiClientSecure cliente;
+  cliente.setInsecure();
+
+  HTTPClient http;
+  http.begin(cliente, String(SUPABASE_URL) + "/rest/v1/rpc/" + funcao);
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(3000);
+
+  String texto;
+  serializeJson(corpo, texto);
+  int codigo = http.POST(texto);
+  if (codigo >= 300) {                     // mostra o erro que o Supabase devolveu
+    Serial.printf("%s: HTTP %d %s\n", funcao, codigo, http.getString().c_str());
+  }
+  http.end();
+  return codigo;
+}
+
+// Chamado só pelo loop(): tira uma "foto" do jogo e deixa na fila.
+// tipo: inicio, ponto, correcao, falta, vantagem, punicao, play, pausa, fim_periodo, fim
+// time: 'A', 'B' ou 0
+void registrarEvento(const char* tipo, char time) {
+  Evento e;
+  e.partidaId = partidaAtualId;
+  strlcpy(e.modo, modoAtual.c_str(), sizeof(e.modo));
+  strlcpy(e.tipo, tipo, sizeof(e.tipo));
+  e.time = time;
+  e.placarA = placarA;
+  e.placarB = placarB;
+  e.setsA = setsA;
+  e.setsB = setsB;
+  e.periodo = periodo;
+  e.tempoJogoS = tempoDecorrido() / 1000;
+
+  if (xQueueSend(filaEventos, &e, 0) != pdTRUE) {
+    Serial.printf("Fila de eventos cheia, perdeu: %s\n", tipo);
+  }
+}
+
+// Envia os eventos da fila, do mais antigo para o mais novo.
+// Só tira da fila depois que o Supabase aceitou.
+void enviarEventos() {
+  Evento e;
+  while (xQueuePeek(filaEventos, &e, 0) == pdTRUE) {
+    JsonDocument corpo;
+    corpo["p_token"] = PLACAR_TOKEN;
+    if (e.partidaId > 0) corpo["p_partida_id"] = e.partidaId;
+    else                 corpo["p_partida_id"] = nullptr;
+    corpo["p_modo"] = e.modo;
+    corpo["p_tipo"] = e.tipo;
+    if (e.time) corpo["p_time"] = String(e.time);
+    else        corpo["p_time"] = nullptr;
+    corpo["p_placar_a"] = e.placarA;
+    corpo["p_placar_b"] = e.placarB;
+    corpo["p_sets_a"] = e.setsA;
+    corpo["p_sets_b"] = e.setsB;
+    corpo["p_periodo"] = e.periodo;
+    corpo["p_tempo_jogo_s"] = e.tempoJogoS;
+
+    int codigo = chamarFuncao("registrar_evento", corpo);
+    if (codigo >= 200 && codigo < 300) {
+      xQueueReceive(filaEventos, &e, 0);
+      Serial.printf("Evento enviado: %s %c %d x %d\n", e.tipo, e.time ? e.time : '-',
+                    e.placarA, e.placarB);
+    } else if (codigo >= 400 && codigo < 500) {
+      // O Supabase recusou (token errado, tipo inválido...): tentar de novo
+      // não adianta e travaria a fila. Joga fora.
+      xQueueReceive(filaEventos, &e, 0);
+      Serial.println("Evento recusado pelo Supabase, descartado.");
+    } else {
+      return;                              // sem internet: tenta na próxima volta
+    }
+  }
+}
+
+// Sinal do Wi-Fi, memória livre, tempo ligado e luz ambiente, a cada 60 s
+void enviarTelemetria() {
+  if (ultimaTelemetria != 0 && millis() - ultimaTelemetria < INTERVALO_TELEMETRIA) return;
+  ultimaTelemetria = millis();
+
+  JsonDocument corpo;
+  corpo["p_token"] = PLACAR_TOKEN;
+  corpo["p_rssi"] = WiFi.RSSI();
+  corpo["p_heap_livre"] = ESP.getFreeHeap();
+  corpo["p_uptime_s"] = millis() / 1000;
+  corpo["p_luz"] = analogRead(SENSOR_LUZ);
+  chamarFuncao("registrar_telemetria", corpo);
 }
 
 // Roda para sempre no núcleo 0: Wi-Fi + consulta ao Supabase a cada 3 s.
@@ -202,6 +320,8 @@ void tarefaRede(void *parametro) {
       continue;
     }
     buscarPartida();
+    enviarEventos();
+    enviarTelemetria();
     delay(3000);
   }
 }
@@ -326,6 +446,17 @@ void zerarTimer() {
   ultimoSegundo = -1;
 }
 
+// Toque de play/pausa nos esportes com relógio
+void alternarTimer() {
+  if (timerRodando) {
+    pausarTimer();
+    registrarEvento("pausa", 0);
+  } else {
+    iniciarTimer();
+    registrarEvento("play", 0);
+  }
+}
+
 
 // ============================================================================
 // 4. MENU INICIAL E UTILITÁRIOS DE TELA
@@ -436,6 +567,7 @@ void desfazer() {
   tiebreak = e.tiebreak;
   strlcpy(historicoSets, e.historicoSets, sizeof(historicoSets));
   redesenharTela();
+  registrarEvento("correcao", 0);
 }
 
 void desenharBola(){
@@ -596,9 +728,12 @@ void desenharPeriodoBasquete() {
 void desenharTimerBasquete() {
   unsigned long decorrido = tempoDecorrido();
   if (decorrido >= DURACAO_QUARTO) {
+    bool acabouAgora = timerRodando;       // só avisa uma vez
     pausarTimer();
     tempoPausado = DURACAO_QUARTO;
     decorrido = DURACAO_QUARTO;
+    // Empate no 4º quarto (ou depois) vai para a prorrogação
+    if (acabouAgora) registrarEvento(periodo >= 4 && placarA != placarB ? "fim" : "fim_periodo", 0);
   }
 
   // Cronômetro regressivo (10:00 até 00:00)
@@ -719,11 +854,13 @@ void verificarFimSetVolei() {
     setEncerrado = true;
     atualizarSetsVolei();
     desenharTopoVolei();
+    registrarEvento(setsA == 3 ? "fim" : "fim_periodo", 'A');
   } else if (placarB >= meta && (placarB - placarA) >= 2) {
     setsB++;
     setEncerrado = true;
     atualizarSetsVolei();
     desenharTopoVolei();
+    registrarEvento(setsB == 3 ? "fim" : "fim_periodo", 'B');
   }
 }
 
@@ -838,6 +975,7 @@ void ganharGameTenis(bool paraA) {
 void pontoTenis(bool paraA) {
   if (fimTenis()) return;
   salvarEstado();
+  int setsAntes = setsA + setsB;
   if (paraA) placarA++; else placarB++;
 
   int meu = paraA ? placarA : placarB;
@@ -849,6 +987,10 @@ void pontoTenis(bool paraA) {
 
   if (ganhouGame) ganharGameTenis(paraA);
   atualizarTenis();
+
+  char time = paraA ? 'A' : 'B';
+  registrarEvento("ponto", time);
+  if (setsA + setsB != setsAntes) registrarEvento(fimTenis() ? "fim" : "fim_periodo", time);
 }
 
 void desenharPlacarTenis(String timeA, String timeB){
@@ -889,9 +1031,11 @@ bool tempoAcabouJiu() {
 void desenharTimerJiu() {
   unsigned long decorrido = tempoDecorrido();
   if (decorrido >= DURACAO_LUTA) {
+    bool acabouAgora = timerRodando;       // só avisa uma vez
     pausarTimer();
     tempoPausado = DURACAO_LUTA;
     decorrido = DURACAO_LUTA;
+    if (acabouAgora) registrarEvento("fim", 0);
   }
 
   // Cronômetro regressivo (05:00 até 00:00)
@@ -963,6 +1107,9 @@ void pontoJiu(bool paraA, int acao) {
   if (acao == 3) (paraA ? vantagensA : vantagensB)++;
   if (acao == 4) (paraA ? punicoesA : punicoesB)++;
   atualizarJiu();
+
+  const char* tipos[] = {"ponto", "ponto", "ponto", "vantagem", "punicao"};
+  registrarEvento(tipos[acao], paraA ? 'A' : 'B');
 }
 
 // Retorna true se o toque foi num dos botões +3 / +4 / V / P
@@ -1060,6 +1207,7 @@ void aplicarPartida(String modo, String timeA, String timeB){
   else if (modo == "padel")    telaAtual = 6;
   else                         telaAtual = 0;
   redesenharTela();
+  if (telaAtual != 0) registrarEvento("inicio", 0);
 }
 
 
@@ -1078,11 +1226,11 @@ void setup() {
 
   pinMode(BOTAO_A, INPUT_PULLUP);
   pinMode(BOTAO_B, INPUT_PULLUP);
-  pinMode(BOTAO_C, INPUT);        // pull-up é o resistor externo
-  // BOTAO_D e BOTAO_E são de toque: sem pinMode
+  pinMode(BOTAO_C, INPUT);        // pull-up é o resistor externo  // BOTAO_D e BOTAO_E são de toque: sem pinMode
 
   // Rede no núcleo 0 (o loop() roda no núcleo 1). 12 KB de pilha: o HTTPS usa bastante.
   filaPartidas = xQueueCreate(1, sizeof(Partida));
+  filaEventos = xQueueCreate(TAMANHO_FILA_EVENTOS, sizeof(Evento));
   xTaskCreatePinnedToCore(tarefaRede, "rede", 12288, NULL, 1, NULL, 0);
   
   telaInicial();
@@ -1097,10 +1245,12 @@ void loop() {
   if (xQueuePeek(filaPartidas, &nova, 0) == pdTRUE) {
     if (nova.primeira) {                           // ao ligar: só guarda os nomes
       xQueueReceive(filaPartidas, &nova, 0);
+      partidaAtualId = nova.id;
       nomeA = nova.timeA;
       nomeB = nova.timeB;
     } else if (nova.substituir || jogoParado()) {  // senão, fica esperando na fila
       xQueueReceive(filaPartidas, &nova, 0);
+      partidaAtualId = nova.id;
       aplicarPartida(nova.modo, nova.timeA, nova.timeB);
     }
   }
@@ -1130,19 +1280,16 @@ void loop() {
           periodoEncerrado = false;
           zerarTimer();
         }
-      } else if (timerRodando) pausarTimer();
-      else iniciarTimer();
+      } else alternarTimer();
     } else if (telaAtual == 2) {                     // Basquete: botões FALTA ou play/pausa
       if (!tocouBotoesToque(x, y) && !tempoAcabouBasquete()) {
-        if (timerRodando) pausarTimer();
-        else iniciarTimer();
+        alternarTimer();
       }
     } else if (telaAtual == 3) {                     // Vôlei: botões -1
       tocouBotoesToque(x, y);
     } else if (telaAtual == 5) {                     // Jiu-Jitsu: +3/+4/V/P ou play/pausa
       if (!tocouBotoesJiu(x, y) && !tempoAcabouJiu()) {
-        if (timerRodando) pausarTimer();
-        else iniciarTimer();
+        alternarTimer();
       }
     }
 
@@ -1156,24 +1303,29 @@ void loop() {
     if (apertou(BOTAO_A)) {
       placarA++;
       atualizarPlacar();
+      registrarEvento("ponto", 'A');
     }
     if (apertou(BOTAO_B)) {
       placarB++;
       atualizarPlacar();
+      registrarEvento("ponto", 'B');
     }
     // BOTAO_C: encerra o tempo (fim do 1º = intervalo, fim do 2º = fim de jogo)
     if (apertou(BOTAO_C) && !periodoEncerrado && tempoDecorrido() > 0) {
       pausarTimer();
       periodoEncerrado = true;
       ultimoSegundo = -1;                  // redesenha "INTERVALO" / "FIM DE JOGO"
+      registrarEvento(periodo == 1 ? "fim_periodo" : "fim", 0);
     }
     if (apertou(BOTAO_D)) {
       faltasA++;
       atualizarFaltas(0);
+      registrarEvento("falta", 'A');
     }
     if (apertou(BOTAO_E)) {
       faltasB++;
       atualizarFaltas(0);
+      registrarEvento("falta", 'B');
     }
   }
 
@@ -1184,10 +1336,12 @@ void loop() {
     if (apertou(BOTAO_A)) {
       placarA++;
       atualizarPlacarBasquete();
+      registrarEvento("ponto", 'A');
     }
     if (apertou(BOTAO_B)) {
       placarB++;
       atualizarPlacarBasquete();
+      registrarEvento("ponto", 'B');
     }
     if (apertou(BOTAO_C)) {
       faltasA = 0;
@@ -1200,10 +1354,12 @@ void loop() {
     if (apertou(BOTAO_D)) {
       faltasA++;
       atualizarFaltas(5);
+      registrarEvento("falta", 'A');
     }
     if (apertou(BOTAO_E)) {
       faltasB++;
       atualizarFaltas(5);
+      registrarEvento("falta", 'B');
     }
   }
 
@@ -1215,12 +1371,14 @@ void loop() {
     if (apertou(BOTAO_A) && !setEncerrado && setsA < 3 && setsB < 3) {
       placarA++;
       atualizarPontosVolei();
+      registrarEvento("ponto", 'A');
       verificarFimSetVolei();
     }
     // +1 Ponto Time B
     if (apertou(BOTAO_B) && !setEncerrado && setsA < 3 && setsB < 3) {
       placarB++;
       atualizarPontosVolei();
+      registrarEvento("ponto", 'B');
       verificarFimSetVolei();
     }
     // BOTAO_C: Iniciar próximo set (zera pontos do set e avança para o próximo)
@@ -1242,6 +1400,7 @@ void loop() {
       }
       placarA--;
       atualizarPontosVolei();
+      registrarEvento("correcao", 'A');
     }
     // BOTAO_E (toque): -1 Ponto Time B (Correção)
     if (apertou(BOTAO_E) && placarB > 0) {
@@ -1253,6 +1412,7 @@ void loop() {
       }
       placarB--;
       atualizarPontosVolei();
+      registrarEvento("correcao", 'B');
     }
   }
 
