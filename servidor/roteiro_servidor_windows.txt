@@ -229,6 +229,13 @@ PROBLEMAS COMUNS
       -> outro programa usa a 3000/1880/8086. Fechar o programa ou trocar
          o número da esquerda no docker-compose.yml (ex.: "3001:3000").
 
+  Depois de reiniciar o PC, o InfluxDB (8086) abre mas o Grafana (3000)
+  ou o Node-RED (1880) não ("conexão fechada", mesmo em localhost),
+  com "docker compose ps" mostrando tudo "Up"
+      -> o repasse de portas do Docker travou. Reiniciar os containers
+         (não apaga dados):
+           docker compose restart grafana nodered
+
   Esqueci a senha do Grafana
       -> docker compose exec grafana grafana cli admin reset-admin-password NOVA_SENHA
 
